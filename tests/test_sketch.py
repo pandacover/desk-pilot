@@ -6,7 +6,16 @@ from typing import Any
 from desk_pilot.agent.guide import is_guide_goal, snapshot_advanced
 from desk_pilot.agent.loop import AgentLoop
 from desk_pilot.desktop.mock import MockDesktop
-from desk_pilot.desktop.overlay import HighlightOverlay, get_overlay, overlay_wintypes, wndclassw_type
+from desk_pilot.desktop.overlay import (
+    HighlightOverlay,
+    apply_overlay_argtypes,
+    coerce_win_handle,
+    get_overlay,
+    hwnd_topmost_handle,
+    overlay_api_argtypes,
+    overlay_wintypes,
+    wndclassw_type,
+)
 from desk_pilot.desktop.sketch import (
     distance_to_rect_border,
     expand_tiny_rect,
@@ -43,6 +52,39 @@ class SketchPathTests(unittest.TestCase):
         self.assertIsNone(as_rect(None))
         self.assertIsNone(as_rect([0, 0, 0, 0]))
         self.assertIsNone(as_rect("nope"))
+        # Geometric coerce still accepts the (0,0) pad; sketchable_rect rejects it.
+        self.assertEqual(as_rect([-12, -12, 12, 12]), [-12, -12, 12, 12])
+
+    def test_zero_zero_xy_is_not_sketchable(self) -> None:
+        from desk_pilot.desktop.rects import (
+            SKIP_ORIGIN_PAD,
+            is_placeholder_origin_rect,
+            rect_skip_reason,
+            sketchable_rect,
+            usable_screen_point,
+            xy_pad_rect,
+        )
+
+        self.assertFalse(usable_screen_point(0, 0))
+        self.assertFalse(usable_screen_point("0", "0"))
+        self.assertTrue(usable_screen_point(240, 180))
+        self.assertIsNone(xy_pad_rect(0, 0, 12))
+        self.assertEqual(xy_pad_rect(240, 180, 12), [228, 168, 252, 192])
+        self.assertTrue(is_placeholder_origin_rect([-12, -12, 12, 12]))
+        self.assertTrue(is_placeholder_origin_rect([-10, -10, 10, 10]))
+        self.assertFalse(is_placeholder_origin_rect([0, 0, 1920, 1080]))
+        self.assertFalse(is_placeholder_origin_rect([0, 1040, 48, 1080]))
+        self.assertIsNone(sketchable_rect([-12, -12, 12, 12]))
+        self.assertEqual(rect_skip_reason([-12, -12, 12, 12]), SKIP_ORIGIN_PAD)
+        self.assertIsNone(sketchable_rect([9_999_999, 0, 10_000_010, 40]))
+        desk = MockDesktop()
+        self.assertIsNone(desk.find_control_rect(x=0, y=0))
+        origin = desk.show_highlight([-12, -12, 12, 12])
+        self.assertTrue(origin.get("skipped"))
+        self.assertIn("origin", (origin.get("error") or "").lower())
+        linux = HighlightOverlay().show([-12, -12, 12, 12])
+        self.assertTrue(linux.get("skipped"))
+        self.assertIn("origin", (linux.get("error") or "").lower())
 
     def test_expand_tiny(self) -> None:
         left, top, right, bottom = expand_tiny_rect(50, 50, 52, 51, min_size=12)
@@ -128,6 +170,43 @@ class OverlayNoopTests(unittest.TestCase):
         if not hasattr(wintypes, "HCURSOR"):
             with self.assertRaises(AttributeError):
                 _ = wintypes.HCURSOR
+
+    def test_overlay_argtypes_accept_large_hwnd(self) -> None:
+        import ctypes
+
+        big = 0x00007FFA_12B3_C4D5
+        mapping = overlay_api_argtypes()
+        hwnd_t, hdc_t = mapping["GetDC"][0][0], mapping["GetDC"][1]
+        hbm_t = mapping["CreateDIBSection"][1]
+        select_obj = mapping["SelectObject"][0][1]
+        setpos_hwnd = mapping["SetWindowPos"][0][0]
+        setpos_insert = mapping["SetWindowPos"][0][1]
+        self.assertIsNot(setpos_hwnd, ctypes.c_int)
+        self.assertIsNot(setpos_insert, ctypes.c_int)
+        self.assertIsNot(select_obj, ctypes.c_int)
+        self.assertGreaterEqual(ctypes.sizeof(setpos_hwnd), ctypes.sizeof(ctypes.c_void_p))
+        self.assertGreaterEqual(ctypes.sizeof(select_obj), ctypes.sizeof(ctypes.c_void_p))
+        for typ in (hwnd_t, hdc_t, hbm_t, select_obj, setpos_hwnd, setpos_insert):
+            coerce_win_handle(typ, big)
+            typ(big)
+        hwnd_topmost_handle()
+        coerce_win_handle(hwnd_t, -1)
+
+        class Fn:
+            argtypes = None
+            restype = None
+
+        class Dll:
+            pass
+
+        dll = Dll()
+        for name in overlay_api_argtypes():
+            setattr(dll, name, Fn())
+        apply_overlay_argtypes(user32=dll, gdi32=dll, kernel32=dll)
+        dll.SelectObject.argtypes[1](big)
+        dll.SetWindowPos.argtypes[0](big)
+        dll.SetWindowPos.argtypes[1](-1)
+        dll.CreateDIBSection.restype(big)
 
 
 class GuideIntentTests(unittest.TestCase):
@@ -365,6 +444,101 @@ class GuideLoopTests(unittest.TestCase):
         self.assertEqual(desk.highlights[0], [0, 0, 1920, 1080])
         self.assertTrue(any("window fallback" in m for k, m in logs if k == "sketch"))
         self.assertTrue(any("whole window is highlighted as a fallback" in t for t in hints if t))
+
+    def test_zero_zero_guide_sketches_window_not_origin_pad(self) -> None:
+        from desk_pilot.agent.guide import resolve_guide_rect
+
+        desk = MockDesktop()
+        resolved = resolve_guide_rect(desk, {"instruction": "Click", "x": 0, "y": 0})
+        self.assertEqual(resolved["rect"], [0, 0, 1920, 1080])
+        self.assertEqual(resolved["source"], "window")
+        self.assertTrue(resolved["fallback"])
+        self.assertNotEqual(resolved["rect"], [-12, -12, 12, 12])
+
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call(
+                            "guide_step",
+                            '{"instruction":"Switch to the already-open browser","x":0,"y":0}',
+                            "1",
+                        )
+                    ],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "2")]},
+            ]
+        )
+        AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=5,
+            force_guide=True,
+            await_step=lambda: "continue",
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("how do I toggle memory in chatgpt web")
+        self.assertEqual(desk.highlights, [[0, 0, 1920, 1080]])
+        self.assertTrue(any(k == "sketch" and "[0, 0, 1920, 1080]" in m for k, m in logs))
+        self.assertFalse(any("[-12, -12, 12, 12]" in m for _, m in logs))
+        self.assertFalse(any("OverflowError" in m for _, m in logs))
+
+    def test_window_title_guide_uses_real_window_rect(self) -> None:
+        from desk_pilot.agent.guide import resolve_guide_rect
+
+        chatgpt = [96, 48, 1340, 880]
+        desk = MockDesktop()
+        desk._upsert_app("helium", "ChatGPT", "browser", rect=chatgpt)
+        resolved = resolve_guide_rect(
+            desk,
+            {"instruction": "Switch to the already-open ChatGPT window", "name": "ChatGPT"},
+        )
+        self.assertEqual(resolved["rect"], chatgpt)
+        self.assertEqual(resolved["source"], "window")
+        titled = resolve_guide_rect(
+            desk,
+            {
+                "instruction": "Switch to ChatGPT",
+                "expected_title": "ChatGPT",
+            },
+        )
+        self.assertEqual(titled["rect"], chatgpt)
+        focus = resolve_guide_rect(
+            desk,
+            {"title_contains": "ChatGPT"},
+            tool_name="focus_window",
+        )
+        self.assertEqual(focus["rect"], chatgpt)
+
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call(
+                            "guide_step",
+                            '{"instruction":"Switch to the already-open ChatGPT window","name":"ChatGPT"}',
+                            "1",
+                        )
+                    ],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "2")]},
+            ]
+        )
+        AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=5,
+            force_guide=True,
+            await_step=lambda: "continue",
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("how do I toggle memory in chatgpt web")
+        self.assertEqual(desk.highlights, [chatgpt])
+        self.assertTrue(any(k == "sketch" and "[96, 48, 1340, 880]" in m for k, m in logs))
+        self.assertFalse(any("[-12, -12, 12, 12]" in m for _, m in logs))
+        self.assertFalse(any(m.startswith("failed:") for k, m in logs if k == "sketch"))
 
     def test_how_to_goal_enables_guide_without_toggle(self) -> None:
         llm = ScriptedLLM(

@@ -103,6 +103,29 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertTrue(result.get("fallback"))
         self.assertIn("whole window", result.get("instruction") or "")
 
+    def test_guide_step_window_title_uses_open_window_rect(self) -> None:
+        self.desk._upsert_app("helium", "ChatGPT", "browser", rect=[96, 48, 1340, 880])
+        result = dispatch_tool(
+            self.desk,
+            "guide_step",
+            {"instruction": "Switch to ChatGPT", "name": "ChatGPT"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("rect"), [96, 48, 1340, 880])
+        self.assertEqual(result.get("source"), "window")
+        self.assertTrue(result.get("fallback"))
+
+    def test_guide_step_zero_zero_does_not_sketch_origin_pad(self) -> None:
+        result = dispatch_tool(
+            self.desk,
+            "guide_step",
+            {"instruction": "Switch to the browser", "x": 0, "y": 0},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("rect"), [0, 0, 1920, 1080])
+        self.assertNotEqual(result.get("rect"), [-12, -12, 12, 12])
+        self.assertTrue(result.get("fallback"))
+
 
 if __name__ == "__main__":
     unittest.main()
