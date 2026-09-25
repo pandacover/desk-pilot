@@ -18,7 +18,7 @@ _GUIDE_PATTERNS = (
     r"\bwalkthrough\b",
 )
 
-_GUIDE_RE = re.compile("|" .join(_GUIDE_PATTERNS), re.IGNORECASE)
+_GUIDE_RE = re.compile("|".join(_GUIDE_PATTERNS), re.IGNORECASE)
 
 ACTION_TOOLS = frozenset(
     {"click", "type_text", "hotkey", "launch_app", "focus_window", "wait_for_window", "screenshot_region"}
