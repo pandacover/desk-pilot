@@ -53,7 +53,7 @@ def _escape_sendkeys(text: str) -> str:
     out: list[str] = []
     for ch in text:
         if ch == "{":
-            out.append("{{")
+            out.append("{{}")
         elif ch == "}":
             out.append("{}}")
         else:
@@ -807,32 +807,85 @@ class WindowsDesktop(DesktopBackend):
         x: int | None = None,
         y: int | None = None,
     ) -> list[int] | None:
+        from desk_pilot.desktop.rects import as_rect
+
         prep = self._prepare()
         if prep:
             return None
         if automation_id or name:
             control = self._find_control(automation_id, name)
             if control is not None:
-                rect = _rect_list(getattr(control, "BoundingRectangle", None))
-                if len(rect) == 4 and (rect[2] > rect[0] or rect[3] > rect[1]):
-                    return rect
+                box = as_rect(_rect_list(getattr(control, "BoundingRectangle", None)))
+                if box:
+                    return box
         if x is not None and y is not None:
-            return [int(x) - 12, int(y) - 12, int(x) + 12, int(y) + 12]
+            return as_rect([int(x) - 12, int(y) - 12, int(x) + 12, int(y) + 12])
         return None
 
-    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> None:
-        if not rect or len(rect) < 4:
-            return
-        try:
-            from desk_pilot.desktop.overlay import get_overlay
-            from desk_pilot.desktop.sketch import normalize_rect
+    def focused_window_rect(self) -> list[int] | None:
+        from desk_pilot.desktop.rects import as_rect
 
-            left, top, right, bottom = normalize_rect(rect)
-            if (right - left) < 1 and (bottom - top) < 1:
-                return
-            get_overlay().show(rect)
+        prep = self._prepare()
+        if prep:
+            return None
+        try:
+            window = self.auto.GetForegroundControl()
         except Exception:
-            return
+            return None
+        if window is None:
+            return None
+        return as_rect(_rect_list(getattr(window, "BoundingRectangle", None)))
+
+    def window_rect_by_title(self, title: str) -> list[int] | None:
+        from desk_pilot.desktop.launch import is_agent_window, window_match_score
+        from desk_pilot.desktop.rects import as_rect
+
+        query = (title or "").strip()
+        if not query:
+            return None
+        prep = self._prepare()
+        if prep:
+            return None
+        best: tuple[int, list[int]] | None = None
+        for control in self._iter_top_windows():
+            summary = self._window_summary(control)
+            if not summary:
+                continue
+            if is_agent_window(summary.get("name") or "", summary.get("process") or ""):
+                continue
+            score = window_match_score(
+                query,
+                title=summary.get("name") or "",
+                process=summary.get("process") or "",
+            )
+            if score < 40:
+                continue
+            box = as_rect(_rect_list(getattr(control, "BoundingRectangle", None)))
+            if not box:
+                continue
+            if best is None or score > best[0]:
+                best = (score, box)
+        return None if best is None else best[1]
+
+    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> dict[str, Any]:
+        from desk_pilot.desktop.overlay import get_overlay
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+
+        box = as_rect(rect)
+        if not box:
+            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+        try:
+            result = get_overlay().show(box)
+        except Exception as exc:  # noqa: BLE001 — overlay create/blit must reach the log
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "rect": box,
+            }
+        if isinstance(result, dict):
+            return result
+        return {"ok": bool(result), "skipped": False, "error": None if result else "overlay show failed", "rect": box}
 
     def hide_highlight(self) -> None:
         try:
