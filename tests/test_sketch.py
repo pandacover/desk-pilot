@@ -6,7 +6,7 @@ from typing import Any
 from desk_pilot.agent.guide import is_guide_goal, snapshot_advanced
 from desk_pilot.agent.loop import AgentLoop
 from desk_pilot.desktop.mock import MockDesktop
-from desk_pilot.desktop.overlay import HighlightOverlay, get_overlay
+from desk_pilot.desktop.overlay import HighlightOverlay, get_overlay, overlay_wintypes, wndclassw_type
 from desk_pilot.desktop.sketch import (
     distance_to_rect_border,
     expand_tiny_rect,
@@ -72,6 +72,62 @@ class OverlayNoopTests(unittest.TestCase):
         overlay.hide()
         overlay.close()
         get_overlay().flash(None)
+
+    def test_wndclass_fields_resolve_without_hcursor(self) -> None:
+        import ctypes
+        from types import SimpleNamespace
+
+        sparse = SimpleNamespace(
+            UINT=ctypes.c_uint,
+            HANDLE=ctypes.c_void_p,
+            HWND=ctypes.c_void_p,
+            HINSTANCE=ctypes.c_void_p,
+            LPCWSTR=ctypes.c_wchar_p,
+            DWORD=ctypes.c_ulong,
+            WORD=ctypes.c_ushort,
+            BOOL=ctypes.c_int,
+            WPARAM=ctypes.c_size_t,
+            LPARAM=ctypes.c_ssize_t,
+            LPVOID=ctypes.c_void_p,
+        )
+        # Mimic the live Windows failure: HCURSOR / HICON / HBRUSH are absent.
+        with self.assertRaises(AttributeError):
+            sparse.HCURSOR  # noqa: B018 — attribute must be missing
+        aliases = overlay_wintypes(sparse)
+        self.assertIs(aliases.HCURSOR, ctypes.c_void_p)
+        self.assertIs(aliases.HICON, ctypes.c_void_p)
+        self.assertIs(aliases.HBRUSH, ctypes.c_void_p)
+        cls = wndclassw_type(sparse)
+        names = [item[0] for item in cls._fields_]
+        self.assertEqual(
+            names,
+            [
+                "style",
+                "lpfnWndProc",
+                "cbClsExtra",
+                "cbWndExtra",
+                "hInstance",
+                "hIcon",
+                "hCursor",
+                "hbrBackground",
+                "lpszMenuName",
+                "lpszClassName",
+            ],
+        )
+        wnd = cls()
+        self.assertEqual(wnd.style, 0)
+
+    def test_real_wintypes_alias_helper_never_raises(self) -> None:
+        from ctypes import wintypes
+
+        aliases = overlay_wintypes()
+        self.assertTrue(hasattr(aliases, "HCURSOR"))
+        cls = wndclassw_type()
+        self.assertTrue(cls._fields_)
+        # Direct access still fails on this Python; the helper must not.
+        if not hasattr(wintypes, "HCURSOR"):
+            with self.assertRaises(AttributeError):
+                _ = wintypes.HCURSOR
 
 
 class GuideIntentTests(unittest.TestCase):

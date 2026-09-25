@@ -98,6 +98,18 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 observe → plan one human step → sketch → you act → Continue → next step → done
 ```
 
+## Pull latest (0.1.6)
+
+Fixes `SKETCH failed: AttributeError: module 'ctypes.wintypes' has no attribute 'HCURSOR'` on some Windows Python builds. Overlay create no longer depends on those missing HANDLE aliases.
+
+```powershell
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Then **Test sketch**, then retry the how-to goal. You should see `SKETCH [l, t, r, b]`, not AttributeError.
+
 ## Pull latest (0.1.5)
 
 Guide mode now logs every sketch attempt. If you still see “Your turn” with no desktop outline, look for `SKETCH skipped` or `SKETCH failed` in the live step log. Settings **Test sketch** draws a fixed rectangle for 2 seconds (overlay vs targeting).

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.6
+
+- Fix Win32 sketch overlay: some Python builds lack `ctypes.wintypes.HCURSOR` (and similar HANDLE aliases). Overlay create now maps those to `HANDLE` / `c_void_p` instead of raising `AttributeError`. Test sketch and guide steps can paint again.
+
 ## 0.1.5
 
 - Guide sketch is no longer silent: the live log always prints `SKETCH` with the rect, `SKETCH skipped: no rect (need name/automation_id/xy)`, or `SKETCH failed:` plus the Win32/`GetLastError` (or exception). Overlay create/blit errors are not swallowed.
