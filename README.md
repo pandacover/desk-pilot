@@ -46,13 +46,13 @@ The key is stored only in your user config:
 
 | OS | Path |
 | --- | --- |
-| Windows | `%APPDATA%\DeskPilot\config.json` |
+| Windows | `%APPDATA%\\DeskPilot\\config.json` |
 | Linux | `~/.config/desk-pilot/config.json` |
 | macOS | `~/Library/Application Support/DeskPilot/config.json` |
 
 Power users can set `OPENROUTER_API_KEY` in the environment; that **overrides** the saved key. The key is never hardcoded and must not be committed.
 
-Region screenshots (mss, only when UIA cannot find a control) go to `%LOCALAPPDATA%\DeskPilot\screenshots\` on Windows, or `~/.cache/desk-pilot/screenshots/` elsewhere.
+Region screenshots (mss, only when UIA cannot find a control) go to `%LOCALAPPDATA%\\DeskPilot\\screenshots\\` on Windows, or `~/.cache/desk-pilot/screenshots/` elsewhere.
 
 ## CLI
 
@@ -79,14 +79,27 @@ Tools the model can call:
 | `click` | By automation id, name, or coordinates |
 | `type_text` | Type into the focused or targeted control |
 | `hotkey` | `win+r`, `enter`, `ctrl+s`, … |
-| `launch_app` | Start an installed app by name (PATH / App Paths / Start Menu / AppsFolder) |
+| `list_windows` / `focus_window` | Reuse an already-open app instead of launching another copy |
+| `launch_app` | Start an installed app, or focus it if it is already running |
 | `screenshot_region` | mss crop; last resort |
 | `wait_for_window` | Title / focus change |
 | `done` / `fail` | End the run |
 
 Default model: `openai/gpt-6-luna`. Reasoning is requested with `reasoning.effort = low` so steps stay snappy. The loop is plain Python (no LangChain / LangGraph / CrewAI).
 
-Typical “open Notepad” path: `launch_app notepad` (or `win+r` → type `notepad` → `enter`) → `wait_for_window` → `type_text hello` → `done`.
+Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_window` (or `launch_app`, which reuses). Otherwise `launch_app notepad` → `wait_for_window` → `type_text hello` → `done`.
+
+## Pull latest (0.1.2)
+
+If a second run opened another Helium window, or a mid-run step died with OpenRouter HTTP 400 `No tool call found for function call output with call_id …`, pull this build:
+
+```bash
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Desk Pilot now lists top-level windows on every observe. `launch_app` focuses an existing instance when it finds one. Tool results stay paired with their assistant `tool_calls` so long runs do not send orphan `call_id`s to OpenRouter.
 
 ## Pull latest (0.1.1)
 
