@@ -50,6 +50,7 @@ def _run_cli(args: argparse.Namespace, *, force_mock: bool) -> int:
         )
         return 2
     backend = get_backend(force_mock=force_mock)
+    backend.highlight_overlay = settings.highlight_overlay
     model = args.model or settings.model or DEFAULT_MODEL
     max_steps = args.max_steps or settings.max_steps or DEFAULT_MAX_STEPS
     client = OpenRouterClient(key, model, reasoning_effort=settings.reasoning_effort or "low")
@@ -69,6 +70,12 @@ def _run_cli(args: argparse.Namespace, *, force_mock: bool) -> int:
             ).run(goal)
     finally:
         client.close()
+        try:
+            from desk_pilot.desktop.overlay import close_overlay
+
+            close_overlay()
+        except Exception:
+            pass
     print(f"\n{result.status.upper()}: {result.message}  (steps={result.steps})")
     return 0 if result.status == "done" else 1
 

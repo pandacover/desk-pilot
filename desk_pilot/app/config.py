@@ -51,6 +51,7 @@ class Settings:
     max_steps: int = DEFAULT_MAX_STEPS
     reasoning_effort: str = "low"
     confirm_before_run: bool = True
+    highlight_overlay: bool = True
 
     def masked_key(self) -> str:
         key = self.effective_api_key()
@@ -76,6 +77,7 @@ class Settings:
             "max_steps": int(self.max_steps) or DEFAULT_MAX_STEPS,
             "reasoning_effort": self.reasoning_effort or "low",
             "confirm_before_run": bool(self.confirm_before_run),
+            "highlight_overlay": bool(self.highlight_overlay),
         }
 
 
@@ -103,7 +105,8 @@ def load_settings(path: Path | None = None) -> Settings:
         model=str(data.get("model") or DEFAULT_MODEL).strip() or DEFAULT_MODEL,
         max_steps=max_steps,
         reasoning_effort=effort,
-        confirm_before_run=bool(data.get("confirm_before_run", True)),
+        confirm_before_run=_as_bool(data.get("confirm_before_run"), True),
+        highlight_overlay=_as_bool(data.get("highlight_overlay"), True),
     )
 
 
@@ -113,3 +116,18 @@ def save_settings(settings: Settings, path: Path | None = None) -> Path:
     payload = settings.to_disk_dict()
     file.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return file
+
+
+def _as_bool(value: object, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
