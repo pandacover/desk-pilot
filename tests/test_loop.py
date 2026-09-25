@@ -117,6 +117,49 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(desk.edit_text, "")
         self.assertIn("Notepad", desk.window_title)
 
+    def test_launch_app_skips_second_instance(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {"content": "", "tool_calls": [_call("launch_app", '{"name":"notepad"}', "1")]},
+                {"content": "", "tool_calls": [_call("type_text", '{"text":"keep me"}', "2")]},
+                {"content": "", "tool_calls": [_call("launch_app", '{"name":"Notepad"}', "3")]},
+                {"content": "", "tool_calls": [_call("done", '{"result":"reused notepad"}', "4")]},
+            ]
+        )
+        desk = MockDesktop()
+        result = AgentLoop(backend=desk, llm=llm, max_steps=8).run("Open Notepad")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(desk.edit_text, "keep me")
+        launches = [a for a in desk.actions if a.startswith("launch_app")]
+        self.assertEqual(len(launches), 2)
+
+    def test_pairing_error_resets_history_and_continues(self) -> None:
+        from desk_pilot.llm.openrouter import LLMError
+
+        class FlakyLLM:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.payloads: list[list[dict[str, Any]]] = []
+
+            def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+                self.calls += 1
+                self.payloads.append(messages)
+                if self.calls == 1:
+                    raise LLMError(
+                        "OpenRouter HTTP 400: No tool call found for function call output "
+                        "with call_id call_9HUXjgVneTm5MLPQXibJnRf6."
+                    )
+                return {"content": "", "tool_calls": [_call("done", '{"result":"recovered"}', "z")]}
+
+        llm = FlakyLLM()
+        result = AgentLoop(backend=MockDesktop(), llm=llm, max_steps=5).run("Click Start")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.message, "recovered")
+        self.assertEqual(llm.calls, 2)
+        second = llm.payloads[1]
+        self.assertEqual(second[0]["role"], "system")
+        self.assertTrue(all(m.get("role") != "tool" for m in second))
+
 
 if __name__ == "__main__":
     unittest.main()

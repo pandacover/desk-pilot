@@ -73,6 +73,22 @@ class MockDesktopTests(unittest.TestCase):
         self.assertEqual(self.desk.list_ui()["window"]["name"], "Desktop")
         self.assertTrue(self.desk.launch_app("notepad")["ok"])
 
+    def test_launch_app_reuses_open_notepad(self) -> None:
+        self.desk.launch_app("Notepad")
+        self.desk.type_text("hello")
+        self.desk.scene = "desktop"
+        self.desk.window_title = "Desktop"
+        titles = [w["name"] for w in self.desk.list_windows()["windows"]]
+        self.assertTrue(any("Notepad" in t for t in titles))
+        again = self.desk.launch_app("Notepad")
+        self.assertTrue(again["ok"])
+        self.assertTrue(again.get("reused"))
+        self.assertEqual(again.get("method"), "existing_window")
+        self.assertIn("Notepad", self.desk.window_title)
+        self.assertEqual(self.desk.edit_text, "hello")
+        focused = self.desk.focus_window(title_contains="Notepad")
+        self.assertTrue(focused["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()
