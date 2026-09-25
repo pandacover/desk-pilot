@@ -79,13 +79,28 @@ Tools the model can call:
 | `click` | By automation id, name, or coordinates |
 | `type_text` | Type into the focused or targeted control |
 | `hotkey` | `win+r`, `enter`, `ctrl+s`, … |
+| `launch_app` | Start an installed app by name (PATH / App Paths / Start Menu / AppsFolder) |
 | `screenshot_region` | mss crop; last resort |
 | `wait_for_window` | Title / focus change |
 | `done` / `fail` | End the run |
 
 Default model: `openai/gpt-6-luna`. Reasoning is requested with `reasoning.effort = low` so steps stay snappy. The loop is plain Python (no LangChain / LangGraph / CrewAI).
 
-Typical “open Notepad” path: `win+r` → type `notepad` → `enter` → `wait_for_window` → `type_text hello` → `done`.
+Typical “open Notepad” path: `launch_app notepad` (or `win+r` → type `notepad` → `enter`) → `wait_for_window` → `type_text hello` → `done`.
+
+## Pull latest (0.1.1)
+
+If a live Windows run showed **every OBSERVE as `Window: ? · 0 controls`** and the model mentioned `CoInitialize has not been called`, you are on a build that never initialized COM on the agent worker thread. Pull this repo and reinstall:
+
+```bash
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Desk Pilot now calls `CoInitializeEx` (STA) on **every thread** that uses UI Automation (the CustomTkinter worker and `--cli`), then recreates `uiautomation`’s COM singleton on that thread. Failed `list_ui` calls surface the COM error in the live log instead of an empty tree.
+
+`launch_app` looks up installed programs via PATH, registry App Paths, Start Menu shortcuts, and `shell:AppsFolder`. Prefer it over Win+R for browsers and other apps that are not on PATH. If Win+R shows “Windows cannot find”, dismiss the dialog and try `launch_app` or Start search.
 
 ## Safety
 

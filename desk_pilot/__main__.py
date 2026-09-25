@@ -57,13 +57,16 @@ def _run_cli(args: argparse.Namespace, *, force_mock: bool) -> int:
     def log(kind: str, message: str) -> None:
         print(f"[{kind}] {message}", flush=True)
 
+    from desk_pilot.desktop.com import com_thread
+
     try:
-        result = AgentLoop(
-            backend=backend,
-            llm=client,
-            max_steps=max_steps,
-            on_log=log,
-        ).run(goal)
+        with com_thread():
+            result = AgentLoop(
+                backend=backend,
+                llm=client,
+                max_steps=max_steps,
+                on_log=log,
+            ).run(goal)
     finally:
         client.close()
     print(f"\n{result.status.upper()}: {result.message}  (steps={result.steps})")
