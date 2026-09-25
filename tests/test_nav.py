@@ -95,17 +95,36 @@ class NavigateToolTests(unittest.TestCase):
         self.assertIn("stale", (result.get("reason") or "").lower())
         self.assertIn("brawlhalla.exe - Helium", result.get("title") or desk.window_title)
 
-    def test_navigate_missing_address_control(self) -> None:
+    def test_navigate_missing_address_control_uses_omnibox(self) -> None:
         desk = MockDesktop()
         desk._open_tldraw()
         desk.hide_address_bar = True
         tree = desk.list_ui()
         self.assertIsNone(address_control_from_snapshot(tree))
         result = run_navigate(desk, "https://example.com")
+        self.assertTrue(result["nav_ok"], result.get("reason"))
+        self.assertFalse(result["nav_failed"])
+        self.assertTrue(result.get("omnibox_fallback"))
+        self.assertEqual(result.get("method"), "omnibox")
+        self.assertIn("example", desk.window_title.lower())
+        self.assertIn("hotkey ctrl+l", desk.actions)
+        self.assertTrue(any(a.startswith("type ") for a in desk.actions))
+        self.assertIn("hotkey enter", desk.actions)
+
+    def test_navigate_missing_address_stale_title_still_verifies(self) -> None:
+        desk = MockDesktop()
+        desk._open_tldraw()
+        desk.hide_address_bar = True
+        desk.window_title = "thin tree - Helium"
+        desk.stale_nav = True
+        result = run_navigate(desk, "https://example.com")
         self.assertTrue(result["nav_failed"])
         self.assertFalse(result["nav_ok"])
-        self.assertIn("missing address control", (result.get("reason") or "").lower())
-        self.assertFalse(any(a.startswith("type ") for a in desk.actions))
+        self.assertTrue(result.get("omnibox_fallback"))
+        self.assertIn("hotkey ctrl+l", desk.actions)
+        self.assertTrue(any(a.startswith("type ") for a in desk.actions))
+        self.assertIn("hotkey enter", desk.actions)
+        self.assertEqual(desk.window_title, "thin tree - Helium")
 
     def test_navigate_rejects_non_chromium(self) -> None:
         desk = MockDesktop()
