@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from desk_pilot.agent.nav import (
@@ -132,6 +133,40 @@ class NavigateToolTests(unittest.TestCase):
         result = run_navigate(desk, "https://example.com")
         self.assertTrue(result["nav_failed"])
         self.assertIn("Chromium-family", result.get("reason") or "")
+
+    def test_navigate_found_control_relookup_fail_still_completes(self) -> None:
+        desk = MockDesktop()
+        desk._open_tldraw()
+        desk.fail_type_text_relookup = True
+        desk.fail_handle_type = True
+        tree = desk.list_ui()
+        self.assertIsNotNone(address_control_from_snapshot(tree))
+        direct = desk.type_text("https://example.com", name="Address and search bar", clear=True)
+        self.assertFalse(direct["ok"])
+        self.assertIn("Target control not found", direct.get("error") or "")
+        result = run_navigate(desk, "https://example.com")
+        blob = json.dumps(result)
+        self.assertNotIn("Target control not found", blob)
+        self.assertNotIn("Target control not found", result.get("reason") or "")
+        self.assertTrue(result["nav_ok"], result.get("reason"))
+        self.assertTrue(result.get("omnibox_fallback"))
+        self.assertEqual(result.get("method"), "omnibox")
+        self.assertIn("example", desk.window_title.lower())
+        self.assertIn("hotkey ctrl+l", desk.actions)
+        self.assertTrue(any(a.startswith("type ") for a in desk.actions))
+        self.assertIn("hotkey enter", desk.actions)
+
+    def test_navigate_held_handle_skips_relookup(self) -> None:
+        desk = MockDesktop()
+        desk._open_tldraw()
+        desk.fail_type_text_relookup = True
+        result = run_navigate(desk, "https://example.com")
+        self.assertTrue(result["nav_ok"], result.get("reason"))
+        self.assertEqual(result.get("method"), "uia")
+        self.assertFalse(result.get("omnibox_fallback"))
+        self.assertTrue(any(a.startswith("type_handle ") for a in desk.actions))
+        self.assertFalse(any(a.startswith("type_relookup_fail ") for a in desk.actions))
+        self.assertNotIn("Target control not found", json.dumps(result))
 
 
 if __name__ == "__main__":

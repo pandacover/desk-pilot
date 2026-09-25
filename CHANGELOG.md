@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.4
+
+- **navigate types the held UIA handle**: after resolving the address control, do not call generic `type_text` (which re-looks-up by automation_id/name and can return `Target control not found for type_text`). SetFocus + ValuePattern/SendKeys on that same element. If the handle is stale or typing it fails, fall through to the omnibox path (`ctrl+l`, type, Enter) inside the same call. That missing-target error never reaches the planner or live ERROR log.
+
 ## 0.2.3
 
 - **navigate omnibox fallback**: if the Chromium address Edit/ComboBox is missing from a thin UIA tree (~10 chrome controls, common in Helium), `navigate` stays atomic — `ctrl+l`, type the URL (select-all/clear), Enter, then the existing title/address poll. It no longer returns `missing address control` and dumps the sequence on the planner.

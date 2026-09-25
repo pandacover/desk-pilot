@@ -209,11 +209,11 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "description": (
                 "Change a Chromium-family browser window (Helium, Chrome, Edge) to a URL "
                 "in one step: focus the window, type into the address bar, press Enter, "
-                "and verify the title/address actually changed. If the address Edit/ComboBox "
-                "is missing from the UIA tree, the same call focuses the omnibox (ctrl+l) "
-                "and continues. Use this whenever the browser needs a different URL. Other "
-                "browsers return nav_failed. Optional title_contains / process_contains pick "
-                "the window."
+                "and verify the title/address actually changed. Types into the UIA address "
+                "handle already found (no second name/id lookup). If that handle is missing "
+                "or typing it fails, the same call focuses the omnibox (ctrl+l) and continues. "
+                "Use this whenever the browser needs a different URL. Other browsers return "
+                "nav_failed. Optional title_contains / process_contains pick the window."
             ),
             "parameters": {
                 "type": "object",

@@ -49,6 +49,8 @@ class MockDesktop(DesktopBackend):
         self.address_value = ""
         self.stale_nav = False
         self.hide_address_bar = False
+        self.fail_type_text_relookup = False
+        self.fail_handle_type = False
         self.files_catalog: list[dict[str, Any]] = [
             {
                 "path": r"C:\Program Files (x86)\Steam\steamapps\common\Brawlhalla\Brawlhalla.exe",
@@ -164,6 +166,9 @@ class MockDesktop(DesktopBackend):
         name: str | None = None,
         clear: bool = False,
     ) -> dict[str, Any]:
+        if getattr(self, "fail_type_text_relookup", False) and (automation_id or name):
+            self.actions.append(f"type_relookup_fail {text!r}")
+            return {"ok": False, "dry_run": True, "error": "Target control not found for type_text."}
         self.actions.append(f"type {text!r}")
         if self.scene == "run":
             self.run_text = "" if clear else self.run_text
@@ -192,6 +197,17 @@ class MockDesktop(DesktopBackend):
                 "value": value,
             }
         )
+
+    def find_address_element(self) -> dict[str, Any] | None:
+        from desk_pilot.agent.nav import address_control_from_snapshot
+
+        return address_control_from_snapshot(self.list_ui())
+
+    def type_into_element(self, element: Any, text: str, *, clear: bool = True) -> dict[str, Any]:
+        self.actions.append(f"type_handle {text!r}")
+        if getattr(self, "fail_handle_type", False):
+            return {"ok": False, "dry_run": True, "error": "Target control not found for type_text."}
+        return self.type_text(str(text), clear=bool(clear))
 
     def hotkey(self, keys: str) -> dict[str, Any]:
         chord = (keys or "").strip().lower().replace(" ", "")

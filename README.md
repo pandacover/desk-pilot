@@ -98,9 +98,9 @@ Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` 
 
 The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once. Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
 
-## Pull latest (0.2.3)
+## Pull latest (0.2.4)
 
-Atomic Chromium `navigate` now finishes even when Helium’s thin UIA tree has no address Edit/ComboBox (`ctrl+l` omnibox fallback inside the same tool call).
+`navigate` types the address-bar handle it already found (no second name/id lookup). A stale `view_*` id that used to leak `Target control not found for type_text` now falls through to `ctrl+l` inside the same tool call.
 
 ```powershell
 git pull
@@ -110,7 +110,7 @@ python -m desk_pilot
 
 Try (auto, not Guide):
 
-1. Any goal that needs opening a URL in Helium — expect a single `navigate` act in the step log, not a chain of `hotkey ctrl+l` + `type_text` + Enter. A thin tree must not abort navigate with `missing address control`.
+1. Any goal that needs opening a URL in Helium — expect a single `navigate` act. It must not abort with `Target control not found for type_text` or `missing address control`.
 2. `find brawlhalla.exe on my computer` — expect `find_files` to return real paths in the step log. It must **not** open Edge via Win+S or type the filename into web search.
 3. `download a picture of a cat` (or similar) — it must **not** Ctrl+S a Google/Images results page and rename HTML to `.jpg`. Open the image, Save image as / download control, then `verify_file`.
 

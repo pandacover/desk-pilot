@@ -165,6 +165,31 @@ def chromium_family_status(snapshot: dict[str, Any] | None) -> tuple[bool, str]:
     return False, observed
 
 
+def address_control_score(item: dict[str, Any] | None) -> int:
+    """How well a compact UIA row looks like a Chromium address Edit/ComboBox."""
+    if not item or not isinstance(item, dict):
+        return 0
+    name = str(item.get("name") or "").lower()
+    aid = str(item.get("automation_id") or "").lower()
+    path = str(item.get("path") or "").lower()
+    ctype = str(item.get("type") or "").lower()
+    blob = f"{name} {aid} {path}"
+    if not any(hint in blob for hint in ADDRESS_HINTS):
+        return 0
+    if ctype and ctype not in ADDRESS_CONTROL_TYPES and "edit" not in ctype and "combo" not in ctype:
+        return 0
+    score = 1
+    if "address and search" in name:
+        score += 6
+    elif "address" in name:
+        score += 4
+    if aid in {"urlbar", "omnibox"} or "urlbar" in aid:
+        score += 5
+    if ctype in ADDRESS_CONTROL_TYPES:
+        score += 1
+    return score
+
+
 def address_control_from_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
     """Best Chromium address Edit/ComboBox from a compact list_ui tree."""
     if not snapshot:
@@ -174,36 +199,15 @@ def address_control_from_snapshot(snapshot: dict[str, Any] | None) -> dict[str, 
     for item in snapshot.get("controls") or []:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name") or "").lower()
-        aid = str(item.get("automation_id") or "").lower()
-        path = str(item.get("path") or "").lower()
-        ctype = str(item.get("type") or "").lower()
-        blob = f"{name} {aid} {path}"
-        if not any(hint in blob for hint in ADDRESS_HINTS):
-            continue
-        if ctype and ctype not in ADDRESS_CONTROL_TYPES and "edit" not in ctype and "combo" not in ctype:
-            continue
-        score = 0
-        if "address and search" in name:
-            score += 6
-        elif "address" in name:
-            score += 4
-        if aid in {"urlbar", "omnibox"} or "urlbar" in aid:
-            score += 5
-        if any(hint in blob for hint in ADDRESS_HINTS):
-            score += 1
-        if ctype in ADDRESS_CONTROL_TYPES:
-            score += 1
+        score = address_control_score(item)
         if score > best_score:
             best_score = score
             best = item
     if best:
         return best
     focused = snapshot.get("focused") if isinstance(snapshot.get("focused"), dict) else {}
-    if focused and focused_looks_like_address(snapshot):
-        ctype = str((focused or {}).get("type") or "").lower()
-        if not ctype or ctype in ADDRESS_CONTROL_TYPES or "edit" in ctype or "combo" in ctype:
-            return dict(focused)
+    if focused and focused_looks_like_address(snapshot) and address_control_score(focused):
+        return dict(focused)
     return None
 
 
@@ -290,81 +294,105 @@ def run_navigate(
             after=after,
         )
 
-    address = address_control_from_snapshot(snapshot)
     extra: dict[str, Any] = {}
-    aid: str | None = None
-    name: str | None = None
-    if address:
-        aid = str(address.get("automation_id") or "").strip() or None
-        name = str(address.get("name") or "").strip() or None
+    element = _live_address_element(backend)
+    if element is None:
+        why = "no live address handle"
+        if address_control_from_snapshot(snapshot):
+            why = "address row in tree but no live handle"
+        _focus_omnibox(backend, extra, log, why)
+        _type_omnibox(backend, target)
+    else:
+        name, aid = _element_label(element)
         extra["method"] = "uia"
         extra["address_control"] = {"name": name, "automation_id": aid}
         if log:
             log("act", f"NAV address control: name={name!r} automation_id={aid!r}")
-        try:
-            backend.click(automation_id=aid, name=name)
-        except Exception:
-            pass
-    else:
-        extra["method"] = "omnibox"
-        extra["omnibox_fallback"] = True
-        extra["address_control"] = None
+        typed = _type_into_handle(backend, element, target)
+        if not typed.get("ok"):
+            _focus_omnibox(backend, extra, log, "address handle type failed")
+            _type_omnibox(backend, target)
+    return _verify_after_enter(backend, target, extra=extra, log=log)
+
+
+def _live_address_element(backend: Any) -> Any | None:
+    finder = getattr(backend, "find_address_element", None)
+    if not callable(finder):
+        return address_control_from_snapshot(_snapshot(backend))
+    try:
+        return finder()
+    except Exception:
+        return None
+
+
+def _element_label(element: Any) -> tuple[str | None, str | None]:
+    if element is None:
+        return None, None
+    if isinstance(element, dict):
+        name = str(element.get("name") or "").strip() or None
+        aid = str(element.get("automation_id") or "").strip() or None
+        return name, aid
+    try:
+        name = str(getattr(element, "Name", "") or "").strip() or None
+    except Exception:
+        name = None
+    try:
+        aid = str(getattr(element, "AutomationId", "") or "").strip() or None
+    except Exception:
+        aid = None
+    return name, aid
+
+
+def _looks_like_relookup_error(value: Any) -> bool:
+    return "target control not found" in str(value or "").lower()
+
+
+def _focus_omnibox(backend: Any, extra: dict[str, Any], log, why: str) -> None:
+    extra["method"] = "omnibox"
+    extra["omnibox_fallback"] = True
+    extra["omnibox_reason"] = why
+    if log:
+        log("act", f"NAV {why}; ctrl+l omnibox fallback")
+    try:
+        backend.hotkey("ctrl+l")
+    except Exception as exc:
+        extra["omnibox_error"] = str(exc)
         if log:
-            log("act", "NAV no address Edit/ComboBox in UIA tree; ctrl+l omnibox fallback")
-        try:
-            backend.hotkey("ctrl+l")
-        except Exception as exc:
-            extra["omnibox_error"] = str(exc)
-            if log:
-                log("error", f"NAV ctrl+l failed: {exc}")
-    return _commit_navigation(
-        backend,
-        target,
-        automation_id=aid,
-        name=name,
-        log=log,
-        extra=extra,
-    )
+            log("act", f"NAV ctrl+l failed ({exc}); typing into the focused field")
 
 
-def _commit_navigation(
+def _type_into_handle(backend: Any, element: Any, target: str) -> dict[str, Any]:
+    filler = getattr(backend, "type_into_element", None)
+    if not callable(filler):
+        return {"ok": False, "error": "no type_into_element"}
+    try:
+        typed = filler(element, str(target), clear=True)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    if not isinstance(typed, dict):
+        return {"ok": bool(typed)}
+    return typed
+
+
+def _type_omnibox(backend: Any, target: str) -> dict[str, Any]:
+    """Type the URL into the focused omnibox. Never re-looks-up by id/name."""
+    try:
+        typed = backend.type_text(str(target), clear=True)
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    if not isinstance(typed, dict):
+        return {"ok": bool(typed)}
+    return typed
+
+
+def _verify_after_enter(
     backend: Any,
     target: str,
     *,
-    automation_id: str | None = None,
-    name: str | None = None,
-    log=None,
     extra: dict[str, Any] | None = None,
+    log=None,
 ) -> dict[str, Any]:
-    """Type into the address/omnibox, Enter, then poll title/address (0.2.1 verify)."""
     extra = dict(extra or {})
-    try:
-        typed = backend.type_text(
-            str(target),
-            automation_id=automation_id,
-            name=name,
-            clear=True,
-        )
-    except Exception as exc:
-        after = nav_fingerprint(_snapshot(backend))
-        return _nav_payload(
-            ok=False,
-            reason=f"navigate could not type the URL: {exc}",
-            target=target,
-            after=after,
-            extra=extra,
-        )
-    if isinstance(typed, dict) and typed.get("ok") is False:
-        after = nav_fingerprint(_snapshot(backend))
-        extra["typed"] = typed
-        return _nav_payload(
-            ok=False,
-            reason=str(typed.get("error") or "navigate could not type the URL."),
-            target=target,
-            after=after,
-            extra=extra,
-        )
-
     before = nav_fingerprint(_snapshot(backend))
     try:
         enter_result = backend.hotkey("enter")
@@ -381,6 +409,13 @@ def _commit_navigation(
     checked["window"] = checked["title"]
     for key, value in extra.items():
         checked.setdefault(key, value)
+    reason = str(checked.get("reason") or checked.get("error") or "")
+    if _looks_like_relookup_error(reason):
+        checked["reason"] = (
+            f"stale navigation: address bar could not be filled; title "
+            f"{checked.get('title')!r} after {target!r}"
+        )
+        checked.pop("error", None)
     if checked.get("nav_ok"):
         checked["ok"] = True
         checked["nav_failed"] = False

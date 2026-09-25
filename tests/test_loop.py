@@ -266,6 +266,37 @@ class AgentLoopTests(unittest.TestCase):
         self.assertTrue(any(m.startswith("navigate ") for m in acts))
         self.assertFalse(any("ctrl+l" in m.lower() for m in acts))
 
+    def test_navigate_relookup_miss_does_not_leak_to_log(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [_call("navigate", '{"url":"https://example.com"}', "1")],
+                },
+                {
+                    "content": "",
+                    "tool_calls": [_call("done", '{"result":"opened"}', "2")],
+                },
+            ]
+        )
+        desk = MockDesktop()
+        desk._open_tldraw()
+        desk.fail_type_text_relookup = True
+        desk.fail_handle_type = True
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=6,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("open a URL in Helium")
+        self.assertEqual(result.status, "done")
+        self.assertIn("example", desk.window_title.lower())
+        joined = "\n".join(f"{k} {m}" for k, m in logs)
+        self.assertNotIn("Target control not found", joined)
+        errors = [m for k, m in logs if k == "error"]
+        self.assertFalse(any("type_text" in m.lower() for m in errors))
+
     def test_stuck_loop_forces_strategy_change(self) -> None:
         class RecordingLLM(ScriptedLLM):
             def __init__(self, script):
