@@ -1,0 +1,38 @@
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+*.log
+
+# Secrets and local user config (never commit keys)
+.env
+.env.*
+config.json
+**/config.json
+
+# Screenshot cache
+screenshots/
+.cache/
+*.png
+!docs/**
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local tool dumps
+agent-tools/
