@@ -76,8 +76,8 @@ Tools the model can call:
 | Tool | Purpose |
 | --- | --- |
 | `list_ui` | Compact UIA tree: name, type, automation id, rect, short path |
-| `click` | By automation id, name, or coordinates. Briefly sketches the target on Windows. |
-| `type_text` | Type into the focused or targeted control (same sketch overlay) |
+| `click` | By automation id, name, or coordinates |
+| `type_text` | Type into the focused or targeted control |
 | `hotkey` | `win+r`, `enter`, `ctrl+s`, … |
 | `list_windows` / `focus_window` | Reuse an already-open app instead of launching another copy |
 | `launch_app` | Start an installed app, or focus it if it is already running |
@@ -89,11 +89,18 @@ Default model: `openai/gpt-6-luna`. Reasoning is requested with `reasoning.effor
 
 Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_window` (or `launch_app`, which reuses). Otherwise `launch_app notepad` → `wait_for_window` → `type_text hello` → `done`.
 
-On Windows, each click or type flashes a short **sketch outline** around the UIA bounding rect (wobbly pencil stroke, ~400ms, click-through). Turn it off in Settings if you do not want it. Hotkeys and `launch_app` skip the overlay.
+## Auto vs Guide
 
-## Pull latest (0.1.3)
+- **Auto** (default): a goal like `Open Helium and search for a dank meme` — the agent clicks and types. No sketch overlay.
+- **Guide**: a goal like `How to open Helium and search for a dank meme`, or Settings **Guide mode**. The agent sketches one control, shows an instruction, and waits. You do the click or type. Then **Continue** (or F8). STOP cancels the lesson.
 
-Sketch overlay around the control the agent is about to click or type into:
+```
+observe → plan one human step → sketch → you act → Continue → next step → done
+```
+
+## Pull latest (0.1.4)
+
+Sketch is for how-to lessons only — not agent auto-clicks:
 
 ```powershell
 git pull
@@ -101,33 +108,17 @@ pip install -r requirements.txt
 python -m desk_pilot
 ```
 
-Toggle **Sketch overlay on click/type** in Settings (saved in `config.json`, default on).
+## Pull latest (0.1.3)
+
+Older build: sketch flashed on auto click/type. 0.1.4 moves that overlay to Guide mode only.
 
 ## Pull latest (0.1.2)
 
-If a second run opened another Helium window, or a mid-run step died with OpenRouter HTTP 400 `No tool call found for function call output with call_id …`, pull this build:
-
-```bash
-git pull
-pip install -r requirements.txt
-python -m desk_pilot
-```
-
-Desk Pilot now lists top-level windows on every observe. `launch_app` focuses an existing instance when it finds one. Tool results stay paired with their assistant `tool_calls` so long runs do not send orphan `call_id`s to OpenRouter.
+Reuse already-open windows; OpenRouter tool-call history pairing. `git pull` then reinstall.
 
 ## Pull latest (0.1.1)
 
-If a live Windows run showed **every OBSERVE as `Window: ? · 0 controls`** and the model mentioned `CoInitialize has not been called`, you are on a build that never initialized COM on the agent worker thread. Pull this repo and reinstall:
-
-```bash
-git pull
-pip install -r requirements.txt
-python -m desk_pilot
-```
-
-Desk Pilot now calls `CoInitializeEx` (STA) on **every thread** that uses UI Automation (the CustomTkinter worker and `--cli`), then recreates `uiautomation`’s COM singleton on that thread. Failed `list_ui` calls surface the COM error in the live log instead of an empty tree.
-
-`launch_app` looks up installed programs via PATH, registry App Paths, Start Menu shortcuts, and `shell:AppsFolder`. Prefer it over Win+R for browsers and other apps that are not on PATH. If Win+R shows “Windows cannot find”, dismiss the dialog and try `launch_app` or Start search.
+COM STA on the agent worker thread (`CoInitialize` / empty `list_ui`) and `launch_app` lookup. `git pull` then reinstall.
 
 ## Safety
 

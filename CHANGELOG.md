@@ -1,8 +1,12 @@
 # Changelog
 
+## 0.1.4
+
+- Guide / how-to mode: goals like “how to …” or Settings **Guide mode** sketch each target and wait for you (Continue / F8). The agent does not click or type those steps. Auto goals have no overlay.
+
 ## 0.1.3
 
-- Sketch overlay: before click/type, briefly outline the UIA target with a hand-drawn wobble (not a straight rectangle). Click-through, topmost, no focus steal. Settings toggle **Sketch overlay on click/type** (default on). No-op in Linux dry-run.
+- Sketch overlay around UIA targets (replaced in 0.1.4: overlay is guide-only, not auto-act).
 
 ## 0.1.2
 
