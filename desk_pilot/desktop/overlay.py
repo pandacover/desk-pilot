@@ -20,12 +20,13 @@ class HighlightOverlay:
 
     def show(self, rect: Sequence[float] | None) -> dict[str, Any]:
         """Paint the sketch and leave it up until hide(). Click-through, no focus steal."""
-        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, rect_skip_reason, sketchable_rect
         from desk_pilot.desktop.sketch import render_sketch
 
-        box = as_rect(rect)
+        skip = rect_skip_reason(rect)
+        box = sketchable_rect(rect)
         if not box:
-            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+            return {"ok": False, "skipped": True, "error": skip or SKIP_NO_RECT, "rect": None}
         if sys.platform != "win32":
             return {
                 "ok": False,
@@ -57,7 +58,15 @@ class HighlightOverlay:
                 "error": err or "CreateWindowExW failed",
                 "rect": box,
             }
-        ok, blit_err = _blit(hwnd, image, origin_x, origin_y)
+        try:
+            ok, blit_err = _blit(hwnd, image, origin_x, origin_y)
+        except Exception as exc:  # noqa: BLE001 — 64-bit handle convert errors must surface
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "rect": box,
+            }
         if not ok:
             return {
                 "ok": False,
@@ -82,8 +91,11 @@ class HighlightOverlay:
         if sys.platform != "win32" or not self._hwnd:
             return
         try:
-            ctypes = _ctypes()
-            ctypes.windll.user32.ShowWindow(self._hwnd, 0)  # SW_HIDE
+            import ctypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            apply_overlay_argtypes(user32=user32)
+            user32.ShowWindow(self._hwnd, 0)  # SW_HIDE
         except Exception:
             return
 
@@ -92,8 +104,11 @@ class HighlightOverlay:
             self._hwnd = 0
             return
         try:
-            ctypes = _ctypes()
-            ctypes.windll.user32.DestroyWindow(self._hwnd)
+            import ctypes
+
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            apply_overlay_argtypes(user32=user32)
+            user32.DestroyWindow(self._hwnd)
         except Exception:
             pass
         self._hwnd = 0
@@ -126,10 +141,82 @@ def close_overlay() -> None:
         _singleton = None
 
 
-def _ctypes():  # lazy so Linux imports stay cheap
+def overlay_api_argtypes(wintypes_mod: Any | None = None) -> dict[str, tuple[list[Any], Any]]:
+    """Pointer-sized HWND/HDC/HBITMAP prototypes so x64 handles are not stuffed into c_int."""
     import ctypes
 
-    return ctypes
+    wt = overlay_wintypes(wintypes_mod)
+    hwnd, hdc, hbitmap = wt.HWND, wt.HDC, wt.HBITMAP
+    hgdi = ctypes.c_void_p
+    cint = ctypes.c_int
+    return {
+        "GetDC": ([hwnd], hdc),
+        "ReleaseDC": ([hwnd, hdc], cint),
+        "SetWindowPos": ([hwnd, hwnd, cint, cint, cint, cint, wt.UINT], wt.BOOL),
+        "ShowWindow": ([hwnd, cint], wt.BOOL),
+        "DestroyWindow": ([hwnd], wt.BOOL),
+        "GetModuleHandleW": ([wt.LPCWSTR], wt.HINSTANCE),
+        "CreateCompatibleDC": ([hdc], hdc),
+        "SelectObject": ([hdc, hgdi], hgdi),
+        "DeleteDC": ([hdc], wt.BOOL),
+        "DeleteObject": ([hgdi], wt.BOOL),
+        "CreateDIBSection": (
+            [hdc, ctypes.c_void_p, wt.UINT, ctypes.POINTER(ctypes.c_void_p), hwnd, wt.DWORD],
+            hbitmap,
+        ),
+    }
+
+
+def apply_overlay_argtypes(
+    *,
+    user32: Any | None = None,
+    gdi32: Any | None = None,
+    kernel32: Any | None = None,
+    wintypes_mod: Any | None = None,
+) -> None:
+    mapping = {
+        "GetDC": user32,
+        "ReleaseDC": user32,
+        "SetWindowPos": user32,
+        "ShowWindow": user32,
+        "DestroyWindow": user32,
+        "GetModuleHandleW": kernel32,
+        "CreateCompatibleDC": gdi32,
+        "SelectObject": gdi32,
+        "DeleteDC": gdi32,
+        "DeleteObject": gdi32,
+        "CreateDIBSection": gdi32,
+    }
+    for name, (argtypes, restype) in overlay_api_argtypes(wintypes_mod).items():
+        dll = mapping.get(name)
+        if dll is None:
+            continue
+        fn = getattr(dll, name, None)
+        if fn is None:
+            continue
+        fn.argtypes = argtypes
+        fn.restype = restype
+
+
+def hwnd_topmost_handle() -> Any:
+    """HWND_TOPMOST (-1) as a pointer-sized handle, not a 32-bit int."""
+    wt = overlay_wintypes()
+    return coerce_win_handle(wt.HWND, -1)
+
+
+def coerce_win_handle(typ: Any, value: Any) -> Any:
+    """Build a pointer-sized HWND/HDC/HBITMAP so x64 values never convert through c_int."""
+    import ctypes
+
+    if value is None:
+        return None
+    try:
+        return typ(value)
+    except (OverflowError, TypeError, ValueError):
+        try:
+            return ctypes.c_void_p(int(value))
+        except (OverflowError, TypeError, ValueError):
+            return ctypes.c_void_p(-1)
 
 
 def _wintype_attr(mod: Any, name: str, fallback: Any) -> Any:
@@ -215,6 +302,7 @@ def _create_overlay_hwnd() -> tuple[int, str | None]:
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    apply_overlay_argtypes(user32=user32, kernel32=kernel32)
 
     WS_EX_LAYERED = 0x00080000
     WS_EX_TRANSPARENT = 0x00000020
@@ -235,6 +323,10 @@ def _create_overlay_hwnd() -> tuple[int, str | None]:
 
     LRESULT = ctypes.c_ssize_t
     WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
+    user32.DefWindowProcW.argtypes = [wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM]
+    user32.DefWindowProcW.restype = LRESULT
+    user32.RegisterClassW.argtypes = [ctypes.POINTER(WNDCLASSW)]
+    user32.RegisterClassW.restype = wt.WORD
 
     @WNDPROC
     def _wndproc(hwnd, msg, wparam, lparam):
@@ -295,15 +387,21 @@ def _create_overlay_hwnd() -> tuple[int, str | None]:
 def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | None]:
     import ctypes
 
+    from desk_pilot.desktop.rects import MAX_ABS_COORD, MAX_EDGE, SKIP_ABSURD_RECT
+
     wt = overlay_wintypes()
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    apply_overlay_argtypes(user32=user32, gdi32=gdi32)
+
+    origin_x, origin_y = int(origin_x), int(origin_y)
+    if abs(origin_x) > MAX_ABS_COORD or abs(origin_y) > MAX_ABS_COORD:
+        return False, SKIP_ABSURD_RECT
 
     ULW_ALPHA = 0x00000002
     AC_SRC_OVER = 0x00
     AC_SRC_ALPHA = 0x01
-    HWND_TOPMOST = -1
     SWP_NOACTIVATE = 0x0010
     SWP_SHOWWINDOW = 0x0040
     SWP_NOOWNERZORDER = 0x0200
@@ -311,6 +409,10 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
 
     image = image.convert("RGBA")
     width, height = image.size
+    if width < 2 or height < 2 or width > MAX_EDGE or height > MAX_EDGE:
+        return False, SKIP_ABSURD_RECT
+    if abs(origin_x + width) > MAX_ABS_COORD or abs(origin_y + height) > MAX_ABS_COORD:
+        return False, SKIP_ABSURD_RECT
     bgra = image.tobytes("raw", "BGRA")
 
     class BITMAPINFOHEADER(ctypes.Structure):
@@ -357,7 +459,6 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
     if not hdc_screen:
         return False, _win_error("GetDC failed")
     bits = ctypes.c_void_p()
-    gdi32.CreateDIBSection.restype = wt.HBITMAP
     hbm = gdi32.CreateDIBSection(hdc_screen, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
     if not hbm or not bits:
         user32.ReleaseDC(None, hdc_screen)
@@ -366,18 +467,20 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
 
     hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
     if not hdc_mem:
-        gdi32.DeleteObject(hbm)
+        gdi32.DeleteObject(coerce_win_handle(ctypes.c_void_p, hbm))
         user32.ReleaseDC(None, hdc_screen)
         return False, _win_error("CreateCompatibleDC failed")
-    old = gdi32.SelectObject(hdc_mem, hbm)
+    hbm_h = coerce_win_handle(ctypes.c_void_p, hbm)
+    old = gdi32.SelectObject(hdc_mem, hbm_h)
     blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
     pt_dst = POINT(int(origin_x), int(origin_y))
     size = SIZE(width, height)
     pt_src = POINT(0, 0)
 
+    hwnd_h = coerce_win_handle(wt.HWND, hwnd)
     user32.SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
+        hwnd_h,
+        hwnd_topmost_handle(),
         int(origin_x),
         int(origin_y),
         width,
@@ -398,7 +501,7 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
     user32.UpdateLayeredWindow.restype = wt.BOOL
     ok = bool(
         user32.UpdateLayeredWindow(
-            hwnd,
+            hwnd_h,
             hdc_screen,
             ctypes.byref(pt_dst),
             ctypes.byref(size),
@@ -412,7 +515,7 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
     blit_err = None if ok else _win_error("UpdateLayeredWindow failed")
     gdi32.SelectObject(hdc_mem, old)
     gdi32.DeleteDC(hdc_mem)
-    gdi32.DeleteObject(hbm)
+    gdi32.DeleteObject(hbm_h)
     user32.ReleaseDC(None, hdc_screen)
     return ok, blit_err
 
