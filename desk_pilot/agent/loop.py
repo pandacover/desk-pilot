@@ -7,6 +7,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 from desk_pilot.agent.prompts import SYSTEM_PROMPT, observation_message, user_goal_message
+from desk_pilot.agent.history import (
+    is_tool_pairing_error,
+    normalize_tool_calls,
+    sanitize_messages,
+    trim_messages,
+)
 from desk_pilot.agent.tools import (
     TOOL_DEFINITIONS,
     TerminalCall,
@@ -47,7 +53,9 @@ class AgentLoop:
         if self.backend.dry_run:
             self._log("info", "Dry-run desktop: actions are simulated, not sent to the OS.")
 
+        self._goal = goal
         snapshot = self.backend.list_ui()
+        self._last_snapshot = snapshot
         self._messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_goal_message(goal, snapshot, self.backend.dry_run)},
@@ -61,7 +69,7 @@ class AgentLoop:
                 return RunResult("stopped", "Stopped by user.", step - 1, self.backend.dry_run)
             self._log("plan", f"Step {step}/{self.max_steps} — asking the model…")
             try:
-                response = self.llm.complete(self._messages, TOOL_DEFINITIONS)
+                response = self._complete()
             except LLMError as exc:
                 self._log("error", str(exc))
                 return RunResult("fail", str(exc), step, self.backend.dry_run)
@@ -69,15 +77,15 @@ class AgentLoop:
                 self._log("error", f"LLM error: {exc}")
                 return RunResult("fail", f"LLM error: {exc}", step, self.backend.dry_run)
 
-            tool_calls = response.get("tool_calls") or []
+            tool_calls = normalize_tool_calls(response.get("tool_calls") or [])
             content = (response.get("content") or "").strip()
             if content:
                 self._log("plan", content[:400])
 
             if not tool_calls:
                 nudge = (
-                    "You must call a tool: launch_app, an action, screenshot_region, "
-                    "wait_for_window, done, or fail."
+                    "You must call a tool: list_windows, focus_window, launch_app, "
+                    "an action, wait_for_window, done, or fail."
                 )
                 self._messages.append({"role": "assistant", "content": content or ""})
                 self._messages.append({"role": "user", "content": nudge})
@@ -98,7 +106,7 @@ class AgentLoop:
                 fn = (call.get("function") or {}) if isinstance(call, dict) else {}
                 name = str(fn.get("name") or "")
                 args = parse_arguments(fn.get("arguments"))
-                call_id = str(call.get("id") or name)
+                call_id = str(call.get("id") or "")
                 self._log("act", f"{name} {compact_json(args, 400)}")
                 result = dispatch_tool(self.backend, name, args)
                 if isinstance(result, TerminalCall):
@@ -112,7 +120,6 @@ class AgentLoop:
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "name": name,
                         "content": tool_body,
                     }
                 )
@@ -134,6 +141,7 @@ class AgentLoop:
                     self._messages.append(image_msg)
 
             snapshot = self.backend.list_ui()
+            self._last_snapshot = snapshot
             self._log("observe", f"Window: {self._window_label(snapshot)}")
             if snapshot.get("com_error"):
                 self._log("error", snapshot.get("error") or "list_ui COM failure")
@@ -143,7 +151,7 @@ class AgentLoop:
                     "content": observation_message(snapshot, step, self.max_steps),
                 }
             )
-            self._trim_history()
+            self._messages = trim_messages(sanitize_messages(self._messages))
 
         self._log("fail", f"Reached the {self.max_steps}-step budget without done/fail.")
         return RunResult(
@@ -153,13 +161,33 @@ class AgentLoop:
             self.backend.dry_run,
         )
 
-    def _trim_history(self) -> None:
-        """Keep the system prompt plus a sliding window so prompts stay small."""
-        if len(self._messages) <= 24:
-            return
-        head = self._messages[:2]
-        tail = self._messages[-20:]
-        self._messages = head + tail
+    def _complete(self) -> dict[str, Any]:
+        last_error: LLMError | None = None
+        for attempt in range(2):
+            payload = sanitize_messages(self._messages)
+            try:
+                return self.llm.complete(payload, TOOL_DEFINITIONS)
+            except LLMError as exc:
+                last_error = exc
+                if not is_tool_pairing_error(exc):
+                    raise
+                self._log("error", f"{exc} Resetting tool-call history and retrying.")
+                self._reset_history()
+        raise last_error or LLMError("OpenRouter request failed.")
+
+    def _reset_history(self) -> None:
+        snapshot = self._last_snapshot if isinstance(getattr(self, "_last_snapshot", None), dict) else {}
+        goal = getattr(self, "_goal", "") or ""
+        self._messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": user_goal_message(goal, snapshot, self.backend.dry_run)
+                + "\n\nTool-call history was reset after an API pairing error. "
+                "Continue from this UI. If the target app is already in top_windows, "
+                "focus_window it; do not launch a second copy.",
+            },
+        ]
 
     def _maybe_image_message(self, path: str) -> dict[str, Any] | None:
         file = Path(path)
