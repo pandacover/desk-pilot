@@ -33,25 +33,72 @@ Rules
 - When the goal is clearly complete, call done. If blocked, call fail.
 """
 
+GUIDE_SYSTEM_PROMPT = """You are Desk Pilot in GUIDE mode. You teach the user; you do not control the mouse or keyboard.
 
-def user_goal_message(goal: str, snapshot: dict, dry_run: bool) -> str:
-    mode = (
-        "DRY-RUN: the desktop is a fake in-memory Windows session. "
-        "Win+R then notepad + Enter still 'opens Notepad' in the stub."
-        if dry_run
-        else "LIVE Windows desktop: mouse and keyboard will move."
+Loop: observe the UI tree, plan ONE human step, call guide_step, then wait. The user performs the action. You get a fresh snapshot after they continue.
+
+How to guide
+- guide_step: required. Short instruction (e.g. Click the address bar) plus automation_id or visible name so the sketch can outline the control. Optional expected_title if a new window should appear.
+- list_ui / list_windows: only if the snapshot is not enough.
+- done / fail: end the lesson.
+
+Do NOT call click, type_text, hotkey, launch_app, or focus_window. Those would act for the user.
+
+Opening apps
+1. If top_windows already lists the target, guide_step: switch to / click that window. Do not tell them to launch another copy.
+2. Otherwise guide them to Start search or the taskbar icon by name. Prefer names from the tree.
+3. Win+R is only for PATH commands (notepad, cmd, calc), not browser names like helium.
+
+Rules
+- One guide_step per turn.
+- Stay inside the how-to. Do not ask them to buy anything or enter passwords unless the goal says to.
+- Do not tell them to close Desk Pilot.
+- When the how-to is complete, call done with a short recap.
+"""
+
+
+def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool = False) -> str:
+    if dry_run:
+        mode = (
+            "DRY-RUN: the desktop is a fake in-memory Windows session. "
+            "The user (or the Continue button) still advances each guide step."
+            if guide
+            else (
+                "DRY-RUN: the desktop is a fake in-memory Windows session. "
+                "Win+R then notepad + Enter still 'opens Notepad' in the stub."
+            )
+        )
+    else:
+        mode = (
+            "GUIDE: you sketch; the human clicks and types. Do not move the mouse or keyboard."
+            if guide
+            else "LIVE Windows desktop: mouse and keyboard will move."
+        )
+    closer = (
+        "Call guide_step for the first human action. If top_windows already lists the target app, "
+        "guide them to that window; do not tell them to launch a second copy."
+        if guide
+        else (
+            "Call a tool. If top_windows already lists the target app, call focus_window; "
+            "do not launch a second copy. Start with list_ui only if this snapshot is not enough."
+        )
     )
     return (
         f"Goal:\n{goal.strip()}\n\n"
         f"{mode}\n\n"
         "Current UI (compact UIA tree):\n"
         f"{_dump(snapshot)}\n\n"
-        "Call a tool. If top_windows already lists the target app, call focus_window; "
-        "do not launch a second copy. Start with list_ui only if this snapshot is not enough."
+        f"{closer}"
     )
 
 
-def observation_message(snapshot: dict, step: int, max_steps: int) -> str:
+def observation_message(snapshot: dict, step: int, max_steps: int, *, guide: bool = False) -> str:
+    if guide:
+        return (
+            f"Step {step}/{max_steps} UI after the user continued:\n"
+            f"{_dump(snapshot)}\n"
+            "Verify, then call guide_step for the next human action, or done/fail."
+        )
     return (
         f"Step {step}/{max_steps} UI after the last action:\n"
         f"{_dump(snapshot)}\n"

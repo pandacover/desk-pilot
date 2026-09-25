@@ -181,6 +181,35 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "guide_step",
+            "description": (
+                "Guide mode only: highlight one control and tell the human what to do. "
+                "Do not click or type. One step per turn."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "instruction": {
+                        "type": "string",
+                        "description": "Short instruction, e.g. Click the address bar.",
+                    },
+                    "automation_id": {"type": "string"},
+                    "name": {"type": "string", "description": "Visible Name of the control to sketch."},
+                    "x": {"type": "integer"},
+                    "y": {"type": "integer"},
+                    "expected_title": {
+                        "type": "string",
+                        "description": "If the window title will contain this after the user acts, auto-advance may fire.",
+                    },
+                },
+                "required": ["instruction"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "done",
             "description": "End the run successfully with a short result for the user.",
             "parameters": {
@@ -204,6 +233,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             },
         },
     },
+]
+
+
+GUIDE_TOOL_NAMES = frozenset({"list_ui", "list_windows", "guide_step", "done", "fail"})
+GUIDE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    item for item in TOOL_DEFINITIONS if item["function"]["name"] in GUIDE_TOOL_NAMES
 ]
 
 
@@ -273,6 +308,8 @@ def dispatch_tool(backend: DesktopBackend, name: str, arguments: dict[str, Any])
             title_contains=_opt_str(args.get("title_contains")),
             timeout_seconds=timeout_f,
         )
+    if name == "guide_step":
+        return _guide_step_payload(backend, args)
     if name == "done":
         return TerminalCall("done", {"result": str(args.get("result") or "Done.")})
     if name == "fail":
@@ -307,3 +344,23 @@ def _opt_str(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _guide_step_payload(backend: DesktopBackend, args: dict[str, Any]) -> dict[str, Any]:
+    from desk_pilot.agent.guide import instruction_for_tool
+
+    x = args.get("x")
+    y = args.get("y")
+    rect = backend.find_control_rect(
+        automation_id=_opt_str(args.get("automation_id")),
+        name=_opt_str(args.get("name")),
+        x=int(x) if x is not None and x != "" else None,
+        y=int(y) if y is not None and y != "" else None,
+    )
+    return {
+        "ok": True,
+        "guide": True,
+        "instruction": instruction_for_tool("guide_step", args),
+        "rect": rect,
+        "expected_title": _opt_str(args.get("expected_title")),
+    }

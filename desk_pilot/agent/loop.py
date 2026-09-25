@@ -2,11 +2,24 @@ from __future__ import annotations
 
 import base64
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from desk_pilot.agent.prompts import SYSTEM_PROMPT, observation_message, user_goal_message
+from desk_pilot.agent.guide import (
+    ACTION_TOOLS,
+    expected_from_args,
+    instruction_for_tool,
+    is_guide_goal,
+    snapshot_advanced,
+)
+from desk_pilot.agent.prompts import (
+    GUIDE_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    observation_message,
+    user_goal_message,
+)
 from desk_pilot.agent.history import (
     is_tool_pairing_error,
     normalize_tool_calls,
@@ -14,6 +27,7 @@ from desk_pilot.agent.history import (
     trim_messages,
 )
 from desk_pilot.agent.tools import (
+    GUIDE_TOOL_DEFINITIONS,
     TOOL_DEFINITIONS,
     TerminalCall,
     compact_json,
@@ -25,6 +39,8 @@ from desk_pilot.llm.openrouter import LLMClient, LLMError
 
 
 LogFn = Callable[[str, str], None]
+GuideFn = Callable[[str], None]
+AwaitFn = Callable[[], str]
 
 
 @dataclass
@@ -42,23 +58,38 @@ class AgentLoop:
     max_steps: int = 30
     on_log: LogFn | None = None
     stop_event: threading.Event | None = None
+    force_guide: bool = False
+    continue_event: threading.Event | None = None
+    on_guide_step: GuideFn | None = None
+    await_step: AwaitFn | None = None
     _messages: list[dict[str, Any]] = field(default_factory=list)
+    guide_mode: bool = False
 
     def run(self, goal: str) -> RunResult:
         goal = (goal or "").strip()
         if not goal:
             return RunResult("fail", "Enter a goal first.", 0, self.backend.dry_run)
 
+        self._goal = goal
+        self.guide_mode = is_guide_goal(goal, force=self.force_guide)
         self._log("info", f"Goal: {goal}")
+        if self.guide_mode:
+            self._log(
+                "guide",
+                "Guide mode: sketch each step, you act. Click Continue (or F8) when done. STOP cancels.",
+            )
         if self.backend.dry_run:
             self._log("info", "Dry-run desktop: actions are simulated, not sent to the OS.")
 
-        self._goal = goal
         snapshot = self.backend.list_ui()
         self._last_snapshot = snapshot
+        system = GUIDE_SYSTEM_PROMPT if self.guide_mode else SYSTEM_PROMPT
         self._messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_goal_message(goal, snapshot, self.backend.dry_run)},
+            {"role": "system", "content": system},
+            {
+                "role": "user",
+                "content": user_goal_message(goal, snapshot, self.backend.dry_run, guide=self.guide_mode),
+            },
         ]
         self._log("observe", f"Window: {self._window_label(snapshot)}")
         if snapshot.get("com_error"):
@@ -66,15 +97,18 @@ class AgentLoop:
 
         for step in range(1, self.max_steps + 1):
             if self._stopped():
+                self._clear_guide()
                 return RunResult("stopped", "Stopped by user.", step - 1, self.backend.dry_run)
             self._log("plan", f"Step {step}/{self.max_steps} — asking the model…")
             try:
                 response = self._complete()
             except LLMError as exc:
                 self._log("error", str(exc))
+                self._clear_guide()
                 return RunResult("fail", str(exc), step, self.backend.dry_run)
             except Exception as exc:  # noqa: BLE001 — surface unexpected LLM failures
                 self._log("error", f"LLM error: {exc}")
+                self._clear_guide()
                 return RunResult("fail", f"LLM error: {exc}", step, self.backend.dry_run)
 
             tool_calls = normalize_tool_calls(response.get("tool_calls") or [])
@@ -84,8 +118,12 @@ class AgentLoop:
 
             if not tool_calls:
                 nudge = (
-                    "You must call a tool: list_windows, focus_window, launch_app, "
-                    "an action, wait_for_window, done, or fail."
+                    "You must call guide_step (one human step), done, or fail."
+                    if self.guide_mode
+                    else (
+                        "You must call a tool: list_windows, focus_window, launch_app, "
+                        "an action, wait_for_window, done, or fail."
+                    )
                 )
                 self._messages.append({"role": "assistant", "content": content or ""})
                 self._messages.append({"role": "user", "content": nudge})
@@ -100,13 +138,27 @@ class AgentLoop:
 
             terminal: TerminalCall | None = None
             screenshot_path: str | None = None
+            guided = False
             for call in tool_calls:
                 if self._stopped():
+                    self._clear_guide()
                     return RunResult("stopped", "Stopped by user.", step, self.backend.dry_run)
                 fn = (call.get("function") or {}) if isinstance(call, dict) else {}
                 name = str(fn.get("name") or "")
                 args = parse_arguments(fn.get("arguments"))
                 call_id = str(call.get("id") or "")
+                if self.guide_mode and (name == "guide_step" or name in ACTION_TOOLS):
+                    result = self._run_guide_step(name, args)
+                    guided = True
+                    tool_body = compact_json(result)
+                    self._log("guide", result.get("instruction") or name)
+                    self._messages.append(
+                        {"role": "tool", "tool_call_id": call_id, "content": tool_body}
+                    )
+                    if result.get("awaited") == "stopped":
+                        self._clear_guide()
+                        return RunResult("stopped", "Stopped by user.", step, self.backend.dry_run)
+                    break
                 self._log("act", f"{name} {compact_json(args, 400)}")
                 result = dispatch_tool(self.backend, name, args)
                 if isinstance(result, TerminalCall):
@@ -129,10 +181,12 @@ class AgentLoop:
             if terminal and terminal.name == "done":
                 msg = terminal.payload.get("result") or "Done."
                 self._log("done", msg)
+                self._clear_guide()
                 return RunResult("done", msg, step, self.backend.dry_run)
             if terminal and terminal.name == "fail":
                 msg = terminal.payload.get("reason") or "Failed."
                 self._log("fail", msg)
+                self._clear_guide()
                 return RunResult("fail", msg, step, self.backend.dry_run)
 
             if screenshot_path:
@@ -148,12 +202,17 @@ class AgentLoop:
             self._messages.append(
                 {
                     "role": "user",
-                    "content": observation_message(snapshot, step, self.max_steps),
+                    "content": observation_message(
+                        snapshot, step, self.max_steps, guide=self.guide_mode
+                    ),
                 }
             )
             self._messages = trim_messages(sanitize_messages(self._messages))
+            if guided:
+                continue
 
         self._log("fail", f"Reached the {self.max_steps}-step budget without done/fail.")
+        self._clear_guide()
         return RunResult(
             "fail",
             f"Stopped after {self.max_steps} steps (budget).",
@@ -161,12 +220,93 @@ class AgentLoop:
             self.backend.dry_run,
         )
 
+    def _run_guide_step(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name == "guide_step":
+            payload = dispatch_tool(self.backend, "guide_step", args)
+            if isinstance(payload, TerminalCall):
+                return {"ok": False, "error": "guide_step is not terminal."}
+        else:
+            x = args.get("x")
+            y = args.get("y")
+            rect = self.backend.find_control_rect(
+                automation_id=str(args["automation_id"]).strip() if args.get("automation_id") else None,
+                name=str(args["name"]).strip() if args.get("name") else None,
+                x=int(x) if x is not None and x != "" else None,
+                y=int(y) if y is not None and y != "" else None,
+            )
+            payload = {
+                "ok": True,
+                "guide": True,
+                "instruction": instruction_for_tool(name, args),
+                "rect": rect,
+                "intercepted": name,
+                "note": "Did not perform this action; waiting for you.",
+            }
+        instruction = str(payload.get("instruction") or instruction_for_tool(name, args))
+        rect = payload.get("rect") if isinstance(payload.get("rect"), list) else None
+        expected = expected_from_args(name, args)
+        if payload.get("expected_title") and not expected:
+            expected = {"title_contains": str(payload["expected_title"])}
+        try:
+            self.backend.show_highlight(rect)
+        except Exception:
+            pass
+        if self.on_guide_step:
+            self.on_guide_step(instruction)
+        awaited = self._await_user(expected)
+        try:
+            self.backend.hide_highlight()
+        except Exception:
+            pass
+        if self.on_guide_step:
+            self.on_guide_step("")
+        payload = dict(payload)
+        payload["instruction"] = instruction
+        payload["awaited"] = awaited
+        payload["acted"] = False
+        return payload
+
+    def _await_user(self, expected: dict[str, str] | None) -> str:
+        if self.await_step is not None:
+            return self.await_step() or "continue"
+        if self.continue_event is None:
+            return "continue"
+        self.continue_event.clear()
+        started = time.time()
+        before = self._last_snapshot if isinstance(getattr(self, "_last_snapshot", None), dict) else {}
+        while True:
+            if self._stopped():
+                return "stopped"
+            if self.continue_event.is_set():
+                return "continue"
+            if time.time() - started >= 0.7:
+                try:
+                    after = self.backend.list_ui()
+                except Exception:
+                    after = before
+                if snapshot_advanced(before, after, expected):
+                    self._last_snapshot = after
+                    self._log("guide", "Detected the UI change — advancing.")
+                    return "detected"
+            time.sleep(0.2)
+
+    def _clear_guide(self) -> None:
+        try:
+            self.backend.hide_highlight()
+        except Exception:
+            pass
+        if self.on_guide_step:
+            self.on_guide_step("")
+
     def _complete(self) -> dict[str, Any]:
         last_error: LLMError | None = None
+        tools = GUIDE_TOOL_DEFINITIONS if self.guide_mode else [
+            item for item in TOOL_DEFINITIONS if item["function"]["name"] != "guide_step"
+        ]
         for attempt in range(2):
             payload = sanitize_messages(self._messages)
             try:
-                return self.llm.complete(payload, TOOL_DEFINITIONS)
+                return self.llm.complete(payload, tools)
             except LLMError as exc:
                 last_error = exc
                 if not is_tool_pairing_error(exc):
@@ -178,14 +318,22 @@ class AgentLoop:
     def _reset_history(self) -> None:
         snapshot = self._last_snapshot if isinstance(getattr(self, "_last_snapshot", None), dict) else {}
         goal = getattr(self, "_goal", "") or ""
+        system = GUIDE_SYSTEM_PROMPT if self.guide_mode else SYSTEM_PROMPT
+        extra = (
+            "\n\nTool-call history was reset after an API pairing error. "
+            "Continue from this UI. If the target app is already in top_windows, "
+        )
+        extra += (
+            "guide the user to that window; do not launch a second copy."
+            if self.guide_mode
+            else "focus_window it; do not launch a second copy."
+        )
         self._messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": user_goal_message(goal, snapshot, self.backend.dry_run)
-                + "\n\nTool-call history was reset after an API pairing error. "
-                "Continue from this UI. If the target app is already in top_windows, "
-                "focus_window it; do not launch a second copy.",
+                "content": user_goal_message(goal, snapshot, self.backend.dry_run, guide=self.guide_mode)
+                + extra,
             },
         ]
 
