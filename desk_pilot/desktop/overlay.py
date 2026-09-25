@@ -132,6 +132,67 @@ def _ctypes():  # lazy so Linux imports stay cheap
     return ctypes
 
 
+def _wintype_attr(mod: Any, name: str, fallback: Any) -> Any:
+    """Read a ctypes.wintypes alias; some Python/Windows builds omit HCURSOR/HICON/…"""
+    try:
+        value = getattr(mod, name)
+    except (AttributeError, ImportError):
+        return fallback
+    return fallback if value is None else value
+
+
+def overlay_wintypes(wintypes_mod: Any | None = None) -> Any:
+    """HANDLE-safe wintypes for WNDCLASSW / CreateWindowEx / UpdateLayeredWindow."""
+    import ctypes
+    from types import SimpleNamespace
+
+    if wintypes_mod is None:
+        from ctypes import wintypes as wintypes_mod
+
+    handle = _wintype_attr(wintypes_mod, "HANDLE", ctypes.c_void_p)
+    return SimpleNamespace(
+        UINT=_wintype_attr(wintypes_mod, "UINT", ctypes.c_uint),
+        DWORD=_wintype_attr(wintypes_mod, "DWORD", ctypes.c_ulong),
+        WORD=_wintype_attr(wintypes_mod, "WORD", ctypes.c_ushort),
+        BOOL=_wintype_attr(wintypes_mod, "BOOL", ctypes.c_int),
+        HWND=_wintype_attr(wintypes_mod, "HWND", handle),
+        HINSTANCE=_wintype_attr(wintypes_mod, "HINSTANCE", handle),
+        HICON=_wintype_attr(wintypes_mod, "HICON", handle),
+        HCURSOR=_wintype_attr(wintypes_mod, "HCURSOR", handle),
+        HBRUSH=_wintype_attr(wintypes_mod, "HBRUSH", handle),
+        HMENU=_wintype_attr(wintypes_mod, "HMENU", handle),
+        HBITMAP=_wintype_attr(wintypes_mod, "HBITMAP", handle),
+        HDC=_wintype_attr(wintypes_mod, "HDC", handle),
+        LPCWSTR=_wintype_attr(wintypes_mod, "LPCWSTR", ctypes.c_wchar_p),
+        LPVOID=_wintype_attr(wintypes_mod, "LPVOID", ctypes.c_void_p),
+        WPARAM=_wintype_attr(wintypes_mod, "WPARAM", ctypes.c_size_t),
+        LPARAM=_wintype_attr(wintypes_mod, "LPARAM", ctypes.c_ssize_t),
+    )
+
+
+def wndclassw_type(wintypes_mod: Any | None = None) -> type:
+    """WNDCLASSW Structure whose field types never raise AttributeError on missing aliases."""
+    import ctypes
+
+    wt = overlay_wintypes(wintypes_mod)
+
+    class WNDCLASSW(ctypes.Structure):
+        _fields_ = [
+            ("style", wt.UINT),
+            ("lpfnWndProc", ctypes.c_void_p),
+            ("cbClsExtra", ctypes.c_int),
+            ("cbWndExtra", ctypes.c_int),
+            ("hInstance", wt.HINSTANCE),
+            ("hIcon", wt.HICON),
+            ("hCursor", wt.HCURSOR),
+            ("hbrBackground", wt.HBRUSH),
+            ("lpszMenuName", wt.LPCWSTR),
+            ("lpszClassName", wt.LPCWSTR),
+        ]
+
+    return WNDCLASSW
+
+
 def _win_error(label: str) -> str:
     import ctypes
 
@@ -148,7 +209,9 @@ def _win_error(label: str) -> str:
 
 def _create_overlay_hwnd() -> tuple[int, str | None]:
     import ctypes
-    from ctypes import wintypes
+
+    wt = overlay_wintypes()
+    WNDCLASSW = wndclassw_type()
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -170,22 +233,8 @@ def _create_overlay_hwnd() -> tuple[int, str | None]:
     except Exception:
         pass
 
-    class WNDCLASSW(ctypes.Structure):
-        _fields_ = [
-            ("style", wintypes.UINT),
-            ("lpfnWndProc", ctypes.c_void_p),
-            ("cbClsExtra", ctypes.c_int),
-            ("cbWndExtra", ctypes.c_int),
-            ("hInstance", wintypes.HINSTANCE),
-            ("hIcon", wintypes.HICON),
-            ("hCursor", wintypes.HCURSOR),
-            ("hbrBackground", wintypes.HBRUSH),
-            ("lpszMenuName", wintypes.LPCWSTR),
-            ("lpszClassName", wintypes.LPCWSTR),
-        ]
-
     LRESULT = ctypes.c_ssize_t
-    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wt.HWND, wt.UINT, wt.WPARAM, wt.LPARAM)
 
     @WNDPROC
     def _wndproc(hwnd, msg, wparam, lparam):
@@ -208,20 +257,20 @@ def _create_overlay_hwnd() -> tuple[int, str | None]:
         if err != ERROR_CLASS_ALREADY_EXISTS:
             return 0, _win_error("RegisterClassW failed")
 
-    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.restype = wt.HWND
     user32.CreateWindowExW.argtypes = [
-        wintypes.DWORD,
-        wintypes.LPCWSTR,
-        wintypes.LPCWSTR,
-        wintypes.DWORD,
+        wt.DWORD,
+        wt.LPCWSTR,
+        wt.LPCWSTR,
+        wt.DWORD,
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
-        wintypes.HWND,
-        wintypes.HMENU,
-        wintypes.HINSTANCE,
-        wintypes.LPVOID,
+        wt.HWND,
+        wt.HMENU,
+        wt.HINSTANCE,
+        wt.LPVOID,
     ]
     ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
     hwnd = user32.CreateWindowExW(
@@ -245,7 +294,8 @@ def _create_overlay_hwnd() -> tuple[int, str | None]:
 
 def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | None]:
     import ctypes
-    from ctypes import wintypes
+
+    wt = overlay_wintypes()
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -265,21 +315,21 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
 
     class BITMAPINFOHEADER(ctypes.Structure):
         _fields_ = [
-            ("biSize", wintypes.DWORD),
+            ("biSize", wt.DWORD),
             ("biWidth", ctypes.c_long),
             ("biHeight", ctypes.c_long),
-            ("biPlanes", wintypes.WORD),
-            ("biBitCount", wintypes.WORD),
-            ("biCompression", wintypes.DWORD),
-            ("biSizeImage", wintypes.DWORD),
+            ("biPlanes", wt.WORD),
+            ("biBitCount", wt.WORD),
+            ("biCompression", wt.DWORD),
+            ("biSizeImage", wt.DWORD),
             ("biXPelsPerMeter", ctypes.c_long),
             ("biYPelsPerMeter", ctypes.c_long),
-            ("biClrUsed", wintypes.DWORD),
-            ("biClrImportant", wintypes.DWORD),
+            ("biClrUsed", wt.DWORD),
+            ("biClrImportant", wt.DWORD),
         ]
 
     class BITMAPINFO(ctypes.Structure):
-        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
+        _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wt.DWORD * 3)]
 
     class POINT(ctypes.Structure):
         _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
@@ -307,7 +357,7 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
     if not hdc_screen:
         return False, _win_error("GetDC failed")
     bits = ctypes.c_void_p()
-    gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+    gdi32.CreateDIBSection.restype = wt.HBITMAP
     hbm = gdi32.CreateDIBSection(hdc_screen, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
     if not hbm or not bits:
         user32.ReleaseDC(None, hdc_screen)
@@ -335,17 +385,17 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
         SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER,
     )
     user32.UpdateLayeredWindow.argtypes = [
-        wintypes.HWND,
-        wintypes.HDC,
+        wt.HWND,
+        wt.HDC,
         ctypes.POINTER(POINT),
         ctypes.POINTER(SIZE),
-        wintypes.HDC,
+        wt.HDC,
         ctypes.POINTER(POINT),
-        wintypes.DWORD,
+        wt.DWORD,
         ctypes.POINTER(BLENDFUNCTION),
-        wintypes.DWORD,
+        wt.DWORD,
     ]
-    user32.UpdateLayeredWindow.restype = wintypes.BOOL
+    user32.UpdateLayeredWindow.restype = wt.BOOL
     ok = bool(
         user32.UpdateLayeredWindow(
             hwnd,
