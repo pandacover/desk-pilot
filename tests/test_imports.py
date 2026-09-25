@@ -33,6 +33,8 @@ class ImportSmokeTests(unittest.TestCase):
         self.assertTrue(callable(overlay.get_overlay))
         self.assertTrue(callable(overlay.set_overlay_pump))
         self.assertTrue(callable(overlay.call_on_overlay_thread))
+        self.assertTrue(callable(overlay.is_invalid_hwnd_error))
+        self.assertEqual(overlay.ERROR_INVALID_WINDOW_HANDLE, 1400)
         from desk_pilot.agent.guide import is_guide_goal
 
         self.assertFalse(is_guide_goal("open notepad"))

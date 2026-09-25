@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9
+
+- Guide sketches that sometimes painted and sometimes failed with `UpdateLayeredWindow` `GetLastError=1400` now recreate the overlay HWND on the UI thread and retry the blit once. A failed blit never leaves a stale handle on the singleton. The live log records `hwnd recreated` on the successful retry, or `hwnd recreated, still failed` if the second blit also dies.
+- Overlay create/blit/hide/close still marshal to the Tk owner thread (0.1.8). Test sketch and guide both go through that owner; the agent worker never calls `UpdateLayeredWindow` itself.
+
 ## 0.1.8
 
 - Guide sketches were failing with `UpdateLayeredWindow` `GetLastError=1400` (invalid window handle) after Test sketch worked. The overlay HWND is now owned by the Tk UI thread; `show`/`hide`/`close` from the agent worker are marshaled onto that thread. A HWND created on another thread is never blit from the worker.

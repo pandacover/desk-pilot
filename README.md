@@ -98,6 +98,18 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 observe → plan one human step → sketch → you act → Continue → next step → done
 ```
 
+## Pull latest (0.1.9)
+
+Hardens the sketch overlay after 0.1.8: Test sketch and guide were still flaky (`UpdateLayeredWindow` `GetLastError=1400 Invalid window handle` on some steps). Every show/hide is marshaled to the UI thread. If blit returns 1400, Desk Pilot destroys the HWND, creates a new one on that same thread, and retries once. A failed blit never keeps the stale handle.
+
+```powershell
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Then **Test sketch**, then retry the how-to. You should see `SKETCH [real coords]` and the yellow outline on every Continue wait — not a mix of success and error 1400. A recovered step may log `hwnd recreated`.
+
 ## Pull latest (0.1.8)
 
 Fixes guide-mode sketches after Test sketch works: `SKETCH failed: UpdateLayeredWindow failed (GetLastError=1400 Invalid window handle.)`. Overlay create/blit/hide now run on the UI thread. How-to steps should show the same yellow desktop outline as Test sketch.
