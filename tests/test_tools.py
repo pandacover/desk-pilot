@@ -18,6 +18,8 @@ class ToolDispatchTests(unittest.TestCase):
                 "type_text",
                 "hotkey",
                 "screenshot_region",
+                "list_windows",
+                "focus_window",
                 "launch_app",
                 "wait_for_window",
                 "done",
@@ -56,6 +58,17 @@ class ToolDispatchTests(unittest.TestCase):
     def test_launch_app_missing_name(self) -> None:
         result = dispatch_tool(self.desk, "launch_app", {})
         self.assertFalse(result["ok"])
+
+    def test_focus_window_dispatch(self) -> None:
+        dispatch_tool(self.desk, "launch_app", {"name": "notepad"})
+        listed = dispatch_tool(self.desk, "list_windows", {})
+        names = [w["name"] for w in listed["windows"]]
+        self.assertTrue(any("Notepad" in n for n in names))
+        self.desk.scene = "desktop"
+        self.desk.window_title = "Desktop"
+        focused = dispatch_tool(self.desk, "focus_window", {"title_contains": "Notepad"})
+        self.assertTrue(focused["ok"])
+        self.assertIn("Notepad", self.desk.window_title)
 
 
 if __name__ == "__main__":
