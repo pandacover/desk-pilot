@@ -108,6 +108,29 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "launch_app",
+            "description": (
+                "Start an installed Windows app by display name or executable. "
+                "Searches PATH, registry App Paths, Start Menu .lnk files, and "
+                "shell:AppsFolder. Prefer this over Win+R; Win+R fails when the "
+                "name is not on PATH (e.g. many browsers)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Visible app name or exe stem, e.g. Helium, chrome, notepad.",
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "wait_for_window",
             "description": "Wait until the foreground window title contains the given text.",
             "parameters": {
@@ -193,6 +216,11 @@ def dispatch_tool(backend: DesktopBackend, name: str, arguments: dict[str, Any])
             )
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "error": f"screenshot_region needs x,y,width,height: {exc}"}
+    if name == "launch_app":
+        app = _opt_str(args.get("name"))
+        if not app:
+            return {"ok": False, "error": "launch_app requires name."}
+        return backend.launch_app(app)
     if name == "wait_for_window":
         timeout = args.get("timeout_seconds", 8)
         try:
