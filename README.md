@@ -46,13 +46,13 @@ The key is stored only in your user config:
 
 | OS | Path |
 | --- | --- |
-| Windows | `%APPDATA%\\DeskPilot\\config.json` |
+| Windows | `%APPDATA%\DeskPilot\config.json` |
 | Linux | `~/.config/desk-pilot/config.json` |
 | macOS | `~/Library/Application Support/DeskPilot/config.json` |
 
 Power users can set `OPENROUTER_API_KEY` in the environment; that **overrides** the saved key. The key is never hardcoded and must not be committed.
 
-Region screenshots (mss, only when UIA cannot find a control) go to `%LOCALAPPDATA%\\DeskPilot\\screenshots\\` on Windows, or `~/.cache/desk-pilot/screenshots/` elsewhere.
+Region screenshots (mss, only when UIA cannot find a control) go to `%LOCALAPPDATA%\DeskPilot\screenshots\` on Windows, or `~/.cache/desk-pilot/screenshots/` elsewhere.
 
 ## CLI
 
@@ -76,8 +76,8 @@ Tools the model can call:
 | Tool | Purpose |
 | --- | --- |
 | `list_ui` | Compact UIA tree: name, type, automation id, rect, short path |
-| `click` | By automation id, name, or coordinates |
-| `type_text` | Type into the focused or targeted control |
+| `click` | By automation id, name, or coordinates. Briefly sketches the target on Windows. |
+| `type_text` | Type into the focused or targeted control (same sketch overlay) |
 | `hotkey` | `win+r`, `enter`, `ctrl+s`, … |
 | `list_windows` / `focus_window` | Reuse an already-open app instead of launching another copy |
 | `launch_app` | Start an installed app, or focus it if it is already running |
@@ -88,6 +88,20 @@ Tools the model can call:
 Default model: `openai/gpt-6-luna`. Reasoning is requested with `reasoning.effort = low` so steps stay snappy. The loop is plain Python (no LangChain / LangGraph / CrewAI).
 
 Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_window` (or `launch_app`, which reuses). Otherwise `launch_app notepad` → `wait_for_window` → `type_text hello` → `done`.
+
+On Windows, each click or type flashes a short **sketch outline** around the UIA bounding rect (wobbly pencil stroke, ~400ms, click-through). Turn it off in Settings if you do not want it. Hotkeys and `launch_app` skip the overlay.
+
+## Pull latest (0.1.3)
+
+Sketch overlay around the control the agent is about to click or type into:
+
+```powershell
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Toggle **Sketch overlay on click/type** in Settings (saved in `config.json`, default on).
 
 ## Pull latest (0.1.2)
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3
+
+- Sketch overlay: before click/type, briefly outline the UIA target with a hand-drawn wobble (not a straight rectangle). Click-through, topmost, no focus steal. Settings toggle **Sketch overlay on click/type** (default on). No-op in Linux dry-run.
+
 ## 0.1.2
 
 - Reuse an already-open app: snapshots include `top_windows`; new `list_windows` / `focus_window` tools; `launch_app` focuses a matching window (`reused=true`) instead of starting a second instance.
