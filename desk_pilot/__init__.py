@@ -1,6 +1,6 @@
 """Desk Pilot — a local Windows computer-use agent."""
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 APP_NAME = "Desk Pilot"
 APP_ID = "DeskPilot"
 DEFAULT_MODEL = "openai/gpt-6-luna"

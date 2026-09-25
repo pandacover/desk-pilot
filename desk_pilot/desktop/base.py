@@ -111,6 +111,20 @@ class DesktopBackend(ABC):
     def launch_app(self, name: str) -> dict[str, Any]:
         """Start an installed app, or focus it if it is already open."""
 
+    def find_address_element(self) -> Any | None:
+        """Live UIA handle (or mock row) for the Chromium address bar, if present."""
+        from desk_pilot.agent.nav import address_control_from_snapshot
+
+        try:
+            snap = self.list_ui(max_depth=4, max_controls=50)
+        except Exception:
+            return None
+        return address_control_from_snapshot(snap)
+
+    def type_into_element(self, element: Any, text: str, *, clear: bool = True) -> dict[str, Any]:
+        """Type into an already-resolved control. Must not re-look-up by id/name."""
+        return self.type_text(str(text), clear=bool(clear))
+
     def find_files(
         self,
         name: str | None = None,

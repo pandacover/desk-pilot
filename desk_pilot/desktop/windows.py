@@ -375,51 +375,113 @@ class WindowsDesktop(DesktopBackend):
             except Exception:
                 control = None
         if control is not None:
-            try:
-                control.SetFocus()
-            except Exception:
-                pass
-            if clear:
-                try:
-                    pattern = control.GetPattern(auto.PatternId.ValuePattern)
-                    if pattern is not None:
-                        pattern.SetValue("")
-                    else:
-                        control.SendKeys("{Ctrl}a{Delete}")
-                except Exception:
-                    self._hotkey_fallback(["ctrl", "a"])
-                    self._type_fallback("")
+            return self._fill_control(control, text, clear=clear, allow_pynput=True)
+        typed = self._type_fallback(text)
+        typed["name"] = ""
+        return typed
+
+    def find_address_element(self) -> Any | None:
+        from desk_pilot.agent.nav import address_control_score
+
+        prep = self._prepare()
+        if prep:
+            return None
+        try:
+            window = self.auto.GetForegroundControl()
+        except Exception:
+            return None
+        best = None
+        best_score = 0
+        try:
+            for control, depth in self.auto.WalkControl(window, includeTop=True, maxDepth=8):
+                item = self._brief(control, depth, window)
+                if item is None:
+                    continue
+                score = address_control_score(item)
+                if score > best_score:
+                    best_score = score
+                    best = control
+        except Exception:
+            return best
+        if best is not None:
+            return best
+        try:
+            focused = self.auto.GetFocusedControl()
+        except Exception:
+            focused = None
+        if focused is not None:
+            item = self._brief(focused, 0, window)
+            if item and address_control_score(item) > 0:
+                return focused
+        return None
+
+    def type_into_element(self, element: Any, text: str, *, clear: bool = True) -> dict[str, Any]:
+        prep = self._prepare()
+        if prep:
+            return prep
+        if element is None:
+            return {"ok": False, "error": "No control handle."}
+        return self._fill_control(element, str(text), clear=bool(clear), allow_pynput=False)
+
+    def _fill_control(
+        self,
+        control: Any,
+        text: str,
+        *,
+        clear: bool = False,
+        allow_pynput: bool = True,
+    ) -> dict[str, Any]:
+        auto = self.auto
+        try:
+            control.SetFocus()
+        except Exception:
+            pass
+        if clear:
             try:
                 pattern = control.GetPattern(auto.PatternId.ValuePattern)
-                if pattern is not None and not any(ch in text for ch in "\n\r"):
-                    existing = ""
-                    try:
-                        existing = pattern.Value or ""
-                    except Exception:
-                        existing = ""
-                    pattern.SetValue((existing if not clear else "") + text)
-                    return {
-                        "ok": True,
-                        "typed": text,
-                        "method": "ValuePattern",
-                        "name": control.Name,
-                        "automation_id": control.AutomationId,
-                    }
+                if pattern is not None:
+                    pattern.SetValue("")
+                else:
+                    control.SendKeys("{Ctrl}a{Delete}")
             except Exception:
-                pass
-            try:
-                control.SendKeys(_escape_sendkeys(text), interval=0.01)
+                try:
+                    self._hotkey_fallback(["ctrl", "a"])
+                    self._type_fallback("")
+                except Exception:
+                    pass
+        try:
+            pattern = control.GetPattern(auto.PatternId.ValuePattern)
+            if pattern is not None and not any(ch in text for ch in "\n\r"):
+                existing = ""
+                try:
+                    existing = pattern.Value or ""
+                except Exception:
+                    existing = ""
+                pattern.SetValue((existing if not clear else "") + text)
                 return {
                     "ok": True,
                     "typed": text,
-                    "method": "SendKeys",
-                    "name": getattr(control, "Name", ""),
+                    "method": "ValuePattern",
+                    "name": getattr(control, "Name", "") or "",
+                    "automation_id": getattr(control, "AutomationId", "") or "",
                 }
-            except Exception:
-                pass
-        typed = self._type_fallback(text)
-        typed["name"] = getattr(control, "Name", "") if control is not None else ""
-        return typed
+        except Exception:
+            pass
+        try:
+            control.SendKeys(_escape_sendkeys(text), interval=0.01)
+            return {
+                "ok": True,
+                "typed": text,
+                "method": "SendKeys",
+                "name": getattr(control, "Name", "") or "",
+            }
+        except Exception:
+            pass
+        if allow_pynput:
+            typed = self._type_fallback(text)
+            typed["name"] = getattr(control, "Name", "") if control is not None else ""
+            return typed
+        return {"ok": False, "error": "Could not type into the held control."}
 
     def hotkey(self, keys: str) -> dict[str, Any]:
         prep = self._prepare()
