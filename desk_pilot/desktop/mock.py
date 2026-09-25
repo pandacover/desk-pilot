@@ -291,19 +291,17 @@ class MockDesktop(DesktopBackend):
         x: int | None = None,
         y: int | None = None,
     ) -> list[int] | None:
-        from desk_pilot.desktop.rects import as_rect
+        from desk_pilot.desktop.rects import sketchable_rect, xy_pad_rect
 
         target = self._find(automation_id, name)
         if target:
-            box = as_rect(target.get("rect"))
+            box = sketchable_rect(target.get("rect"))
             if box:
                 return box
-        if x is not None and y is not None:
-            return as_rect([int(x) - 10, int(y) - 10, int(x) + 10, int(y) + 10])
-        return None
+        return xy_pad_rect(x, y, pad=10)
 
     def focused_window_rect(self) -> list[int] | None:
-        from desk_pilot.desktop.rects import as_rect
+        from desk_pilot.desktop.rects import sketchable_rect
 
         window, focused, controls = self._scene_tree()
         title = (window.get("name") or self.window_title or "").strip()
@@ -312,36 +310,62 @@ class MockDesktop(DesktopBackend):
                 continue
             if title and (item.get("name") or "") != title:
                 continue
-            box = as_rect(item.get("rect"))
+            box = sketchable_rect(item.get("rect"))
             if box:
                 return box
         for item in controls:
             if (item.get("type") or "") in {"Window", "Pane"}:
-                box = as_rect(item.get("rect"))
+                box = sketchable_rect(item.get("rect"))
                 if box:
                     return box
-        return as_rect((focused or {}).get("rect"))
+        return sketchable_rect((focused or {}).get("rect"))
 
     def window_rect_by_title(self, title: str) -> list[int] | None:
-        from desk_pilot.desktop.rects import as_rect
+        from desk_pilot.desktop.launch import window_match_score
+        from desk_pilot.desktop.rects import sketchable_rect
 
-        needle = (title or "").strip().lower()
-        if not needle:
+        query = (title or "").strip()
+        if not query:
             return None
+        best: tuple[int, list[int]] | None = None
+        for app in self._open_apps.values():
+            score = window_match_score(
+                query,
+                title=app.get("name") or "",
+                process=app.get("process") or "",
+            )
+            if score < 40:
+                continue
+            box = sketchable_rect(app.get("rect"))
+            if not box:
+                continue
+            if best is None or score > best[0]:
+                best = (score, box)
+        if best:
+            return best[1]
         _window, _focused, controls = self._scene_tree()
         for item in controls:
-            if needle in (item.get("name") or "").lower():
-                box = as_rect(item.get("rect"))
-                if box:
-                    return box
-        return self.focused_window_rect()
+            score = window_match_score(query, title=item.get("name") or "")
+            if score < 40:
+                continue
+            box = sketchable_rect(item.get("rect"))
+            if not box:
+                continue
+            if best is None or score > best[0]:
+                best = (score, box)
+        return None if best is None else best[1]
 
     def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> dict[str, Any]:
-        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, rect_skip_reason, sketchable_rect
 
-        box = as_rect(rect)
+        box = sketchable_rect(rect)
         if not box:
-            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+            return {
+                "ok": False,
+                "skipped": True,
+                "error": rect_skip_reason(rect) or SKIP_NO_RECT,
+                "rect": None,
+            }
         if self.fail_highlight:
             return {
                 "ok": False,
@@ -360,10 +384,22 @@ class MockDesktop(DesktopBackend):
         self.scene = "notepad"
         self.edit_text = ""
         self.window_title = "Untitled - Notepad"
-        self._upsert_app("notepad", self.window_title, "notepad")
+        self._upsert_app("notepad", self.window_title, "notepad", rect=[0, 0, 810, 570])
 
-    def _upsert_app(self, process: str, title: str, scene: str) -> None:
-        self._open_apps[process] = {"name": title, "process": process, "scene": scene}
+    def _upsert_app(
+        self,
+        process: str,
+        title: str,
+        scene: str,
+        rect: list[int] | None = None,
+    ) -> None:
+        previous = self._open_apps.get(process) or {}
+        self._open_apps[process] = {
+            "name": title,
+            "process": process,
+            "scene": scene,
+            "rect": list(rect) if rect else list(previous.get("rect") or [80, 40, 1200, 800]),
+        }
 
     def _close_current_app(self) -> None:
         if self.scene == "notepad":
