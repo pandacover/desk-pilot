@@ -26,6 +26,12 @@ class ImportSmokeTests(unittest.TestCase):
         self.assertTrue(backend.launch_app("notepad").get("reused"))
         self.assertFalse(backend.launch_app("helium")["ok"])
 
+    def test_overlay_modules_import(self) -> None:
+        from desk_pilot.desktop import overlay, sketch
+
+        self.assertTrue(callable(sketch.render_sketch))
+        self.assertTrue(callable(overlay.get_overlay))
+
 
 if __name__ == "__main__":
     unittest.main()
