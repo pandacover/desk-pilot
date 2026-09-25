@@ -48,6 +48,31 @@ class MockDesktopTests(unittest.TestCase):
 
         self.assertTrue(Path(result["path"]).is_file())
 
+    def test_win_r_unknown_app_is_detectable(self) -> None:
+        self.desk.hotkey("win+r")
+        self.desk.type_text("helium")
+        entered = self.desk.hotkey("enter")
+        self.assertFalse(entered["ok"])
+        tree = self.desk.list_ui()
+        self.assertTrue(tree.get("launch_error"))
+        self.assertIn("cannot find", (tree.get("error") or "").lower())
+        waited = self.desk.wait_for_window("Helium", timeout_seconds=0.2)
+        self.assertFalse(waited["ok"])
+        self.assertTrue(waited.get("launch_error"))
+
+    def test_launch_app_opens_notepad(self) -> None:
+        result = self.desk.launch_app("Notepad")
+        self.assertTrue(result["ok"])
+        self.assertIn("Notepad", self.desk.list_ui()["window"]["name"])
+
+    def test_dismiss_run_error_then_launch(self) -> None:
+        self.desk.hotkey("win+r")
+        self.desk.type_text("helium")
+        self.desk.hotkey("enter")
+        self.desk.click(name="OK")
+        self.assertEqual(self.desk.list_ui()["window"]["name"], "Desktop")
+        self.assertTrue(self.desk.launch_app("notepad")["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

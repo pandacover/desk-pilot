@@ -18,6 +18,13 @@ class ImportSmokeTests(unittest.TestCase):
         self.assertTrue(hasattr(ui, "DeskPilotApp"))
         self.assertTrue(hasattr(ui, "run_app"))
 
+    def test_launch_backend_method(self) -> None:
+        from desk_pilot.desktop import get_backend
+
+        backend = get_backend(force_mock=True)
+        self.assertTrue(backend.launch_app("notepad")["ok"])
+        self.assertFalse(backend.launch_app("helium")["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

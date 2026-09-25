@@ -18,6 +18,7 @@ class ToolDispatchTests(unittest.TestCase):
                 "type_text",
                 "hotkey",
                 "screenshot_region",
+                "launch_app",
                 "wait_for_window",
                 "done",
                 "fail",
@@ -46,6 +47,15 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(parse_arguments('{"keys":"ctrl+s"}'), {"keys": "ctrl+s"})
         self.assertEqual(parse_arguments({}), {})
         self.assertIn("_raw", parse_arguments("not-json"))
+
+    def test_launch_app_notepad(self) -> None:
+        result = dispatch_tool(self.desk, "launch_app", {"name": "notepad"})
+        self.assertTrue(result["ok"])
+        self.assertIn("Notepad", self.desk.list_ui()["window"]["name"])
+
+    def test_launch_app_missing_name(self) -> None:
+        result = dispatch_tool(self.desk, "launch_app", {})
+        self.assertFalse(result["ok"])
 
 
 if __name__ == "__main__":
