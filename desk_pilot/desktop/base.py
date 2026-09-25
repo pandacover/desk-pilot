@@ -8,10 +8,22 @@ class DesktopBackend(ABC):
     """UIA-first desktop control. Mock impl is used off Windows."""
 
     dry_run: bool = False
-    highlight_overlay: bool = True
 
-    def flash_highlight(self, rect: list[int] | tuple[int, ...] | None, duration: float | None = None) -> None:
-        """Briefly sketch a UIA bounding rect. No-op when disabled or off Windows."""
+    def find_control_rect(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+    ) -> list[int] | None:
+        """UIA bounding rect for a control, without clicking or typing."""
+        return None
+
+    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> None:
+        """Persistent sketch overlay for guide mode. No-op off Windows."""
+        return
+
+    def hide_highlight(self) -> None:
         return
 
     @abstractmethod

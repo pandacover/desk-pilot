@@ -18,20 +18,25 @@ class HighlightOverlay:
         self._hwnd = 0
         self._class_atom = 0
 
-    def flash(self, rect: Sequence[float] | None, *, duration: float = HIGHLIGHT_SECONDS) -> None:
+    def show(self, rect: Sequence[float] | None) -> bool:
+        """Paint the sketch and leave it up until hide(). Click-through, no focus steal."""
         if sys.platform != "win32" or not rect:
-            return
+            return False
         from desk_pilot.desktop.sketch import normalize_rect, render_sketch
 
         left, top, right, bottom = normalize_rect(rect)
         if (right - left) < 1 and (bottom - top) < 1:
-            return
+            return False
         image, origin_x, origin_y = render_sketch(rect)
         if image.width < 2 or image.height < 2:
-            return
+            return False
         if not self._ensure_window():
-            return
-        if not _blit(self._hwnd, image, origin_x, origin_y):
+            return False
+        return bool(_blit(self._hwnd, image, origin_x, origin_y))
+
+    def flash(self, rect: Sequence[float] | None, *, duration: float = HIGHLIGHT_SECONDS) -> None:
+        """Brief show+hide (unused by auto-act; kept for tests)."""
+        if not self.show(rect):
             return
         wait = max(0.0, min(1.0, float(duration)))
         if wait:
