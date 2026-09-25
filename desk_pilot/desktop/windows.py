@@ -132,21 +132,78 @@ class WindowsDesktop(DesktopBackend):
                 "uiautomation is required on Windows. pip install uiautomation"
             ) from exc
         self.auto = auto
-        auto.uiautomation.SetGlobalSearchTimeout(3)
+        # Timeout only — do not create the IUIAutomation COM singleton here.
+        # The GUI constructs this object on the Tk thread; UIA must be bound on
+        # the worker that actually calls list_ui/click/type.
+        inner = getattr(auto, "uiautomation", auto)
+        inner.SetGlobalSearchTimeout(3)
+        self._start_apps_cache: list[dict[str, str]] | None = None
+
+    def _prepare(self) -> dict[str, Any] | None:
+        from desk_pilot.desktop.com import bind_uia_to_this_thread
+
+        result = bind_uia_to_this_thread(self.auto)
+        inner = getattr(self.auto, "uiautomation", None)
+        if inner is not None and inner is not self.auto:
+            bind_uia_to_this_thread(inner)
+        if not result.get("ok"):
+            return {
+                "ok": False,
+                "com_error": True,
+                "error": result.get("error") or "COM initialization failed on this thread.",
+                "window": {"name": ""},
+                "controls": [],
+            }
+        return None
 
     def list_ui(self, max_depth: int = 5, max_controls: int = 70) -> dict[str, Any]:
+        from desk_pilot.desktop.com import ensure_com, looks_like_com_error
+
+        prep = self._prepare()
+        if prep:
+            return prep
+        try:
+            return self._list_ui_inner(max_depth=max_depth, max_controls=max_controls)
+        except Exception as exc:
+            if looks_like_com_error(exc):
+                ensure_com(force=True)
+                self._prepare()
+                try:
+                    return self._list_ui_inner(max_depth=max_depth, max_controls=max_controls)
+                except Exception as exc2:
+                    return self._com_failure(exc2)
+            return self._com_failure(exc) if looks_like_com_error(exc) else {
+                "ok": False,
+                "error": f"Could not read foreground window: {exc}",
+                "window": {"name": ""},
+                "controls": [],
+            }
+
+    def _list_ui_inner(self, max_depth: int = 5, max_controls: int = 70) -> dict[str, Any]:
+        from desk_pilot.desktop.com import looks_like_com_error
+        from desk_pilot.desktop.launch import detect_run_not_found
+
         auto = self.auto
         max_depth = max(1, min(int(max_depth), 8))
         max_controls = max(8, min(int(max_controls), 120))
         try:
             window = auto.GetForegroundControl()
         except Exception as exc:
-            return {"ok": False, "error": f"Could not read foreground window: {exc}"}
+            payload = {
+                "ok": False,
+                "error": f"Could not read foreground window: {exc}",
+                "window": {"name": "", "error": str(exc)},
+                "controls": [],
+            }
+            if looks_like_com_error(exc):
+                payload["com_error"] = True
+            return payload
         try:
             focused = auto.GetFocusedControl()
         except Exception:
             focused = None
         controls: list[dict[str, Any]] = []
+        walk_error = ""
         try:
             for control, depth in auto.WalkControl(window, includeTop=True, maxDepth=max_depth):
                 item = self._brief(control, depth, window)
@@ -156,18 +213,55 @@ class WindowsDesktop(DesktopBackend):
                 if len(controls) >= max_controls:
                     break
         except Exception as exc:
-            return {
+            walk_error = str(exc)
+            if looks_like_com_error(exc):
+                return self._com_failure(exc, window=self._window_meta(window))
+        meta = self._window_meta(window)
+        if looks_like_com_error(meta.get("error")):
+            return self._com_failure(meta.get("error") or "COM error reading window", window=meta)
+        if not controls and not (meta.get("name") or "").strip():
+            err = walk_error or meta.get("error") or "UI Automation returned no window and 0 controls."
+            payload = {
                 "ok": False,
-                "error": f"WalkControl failed: {exc}",
-                "window": self._window_meta(window),
+                "error": err,
+                "window": meta,
+                "controls": [],
             }
-        return {
+            if looks_like_com_error(err):
+                payload["com_error"] = True
+            return payload
+        launch_error = detect_run_not_found(meta, controls)
+        result = {
             "ok": True,
             "dry_run": False,
-            "window": self._window_meta(window),
+            "window": meta,
             "focused": self._brief(focused, 0, window) if focused is not None else None,
             "controls": controls,
             "truncated": len(controls) >= max_controls,
+        }
+        if walk_error:
+            result["warning"] = f"WalkControl: {walk_error}"
+        if launch_error:
+            result["ok"] = False
+            result["launch_error"] = launch_error
+            result["error"] = (
+                "Win+R failed: Windows cannot find that name (not on PATH). "
+                "Dismiss this dialog (OK/Enter), then call launch_app with the display name, "
+                "or search Start (hotkey win, type the name, enter)."
+            )
+        return result
+
+    def _com_failure(self, exc: Any, window: dict[str, Any] | None = None) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "com_error": True,
+            "error": (
+                f"UI Automation COM error: {exc}. "
+                "Desk Pilot initializes COM (STA CoInitializeEx) on the agent worker thread; "
+                "if this persists, restart the app."
+            ),
+            "window": window or {"name": ""},
+            "controls": [],
         }
 
     def click(
@@ -177,6 +271,9 @@ class WindowsDesktop(DesktopBackend):
         x: int | None = None,
         y: int | None = None,
     ) -> dict[str, Any]:
+        prep = self._prepare()
+        if prep:
+            return prep
         auto = self.auto
         if automation_id or name:
             control = self._find_control(automation_id, name)
@@ -225,6 +322,9 @@ class WindowsDesktop(DesktopBackend):
         name: str | None = None,
         clear: bool = False,
     ) -> dict[str, Any]:
+        prep = self._prepare()
+        if prep:
+            return prep
         auto = self.auto
         control = None
         if automation_id or name:
@@ -284,6 +384,9 @@ class WindowsDesktop(DesktopBackend):
         return typed
 
     def hotkey(self, keys: str) -> dict[str, Any]:
+        prep = self._prepare()
+        if prep:
+            return prep
         parts = _parse_hotkey(keys)
         if not parts:
             return {"ok": False, "error": "Empty hotkey."}
@@ -297,6 +400,9 @@ class WindowsDesktop(DesktopBackend):
             return fallback
 
     def screenshot_region(self, x: int, y: int, width: int, height: int) -> dict[str, Any]:
+        prep = self._prepare()
+        if prep:
+            return prep
         import mss
         from PIL import Image
 
@@ -326,17 +432,37 @@ class WindowsDesktop(DesktopBackend):
         title_contains: str | None = None,
         timeout_seconds: float = 8.0,
     ) -> dict[str, Any]:
+        from desk_pilot.desktop.com import looks_like_com_error
+        from desk_pilot.desktop.launch import detect_run_not_found
+
+        prep = self._prepare()
+        if prep:
+            return prep
         needle = (title_contains or "").strip().lower()
         deadline = time.time() + max(0.2, float(timeout_seconds))
         last = ""
         while time.time() < deadline:
-            try:
-                window = self.auto.GetForegroundControl()
-                last = window.Name or ""
-            except Exception as exc:
-                last = f"<error {exc}>"
+            snapshot = self._list_ui_inner(max_depth=3, max_controls=40)
+            if snapshot.get("com_error") or looks_like_com_error(snapshot.get("error")):
                 time.sleep(0.25)
+                last = str(snapshot.get("error") or "")
                 continue
+            launch_error = snapshot.get("launch_error") or detect_run_not_found(
+                snapshot.get("window") if isinstance(snapshot.get("window"), dict) else None,
+                snapshot.get("controls") if isinstance(snapshot.get("controls"), list) else None,
+            )
+            window = snapshot.get("window") or {}
+            last = str(window.get("name") or "")
+            if launch_error:
+                return {
+                    "ok": False,
+                    "launch_error": launch_error,
+                    "window": last,
+                    "error": (
+                        f"Foreground is a launch-failure dialog, not {title_contains!r}. "
+                        f"{launch_error}. Dismiss it, then call launch_app."
+                    ),
+                }
             if not needle or needle in last.lower():
                 return {"ok": True, "window": last}
             time.sleep(0.25)
@@ -344,6 +470,79 @@ class WindowsDesktop(DesktopBackend):
             "ok": False,
             "error": f"Timed out waiting for title containing {title_contains!r}. Foreground is {last!r}.",
             "window": last,
+        }
+
+    def launch_app(self, name: str) -> dict[str, Any]:
+        from desk_pilot.desktop.launch import (
+            app_path_candidates,
+            match_start_app,
+            start_apps_catalog,
+            start_apps_folder,
+            start_file,
+            start_menu_shortcuts,
+            which_candidates,
+        )
+
+        prep = self._prepare()
+        if prep:
+            return prep
+        query = (name or "").strip()
+        if not query:
+            return {"ok": False, "error": "launch_app requires a name."}
+        tried: list[str] = []
+
+        for candidate in which_candidates(query):
+            tried.append(f"path:{candidate}")
+            if start_file(candidate):
+                return {
+                    "ok": True,
+                    "method": "path",
+                    "started": candidate,
+                    "tried": tried,
+                    "hint": "Wait for the window, then list_ui.",
+                }
+        for candidate in app_path_candidates(query):
+            tried.append(f"app_paths:{candidate}")
+            if start_file(candidate):
+                return {
+                    "ok": True,
+                    "method": "app_paths",
+                    "started": candidate,
+                    "tried": tried,
+                    "hint": "Wait for the window, then list_ui.",
+                }
+        for shortcut in start_menu_shortcuts(query):
+            tried.append(f"start_menu:{shortcut}")
+            if start_file(shortcut):
+                return {
+                    "ok": True,
+                    "method": "start_menu",
+                    "started": shortcut,
+                    "tried": tried,
+                    "hint": "Wait for the window, then list_ui.",
+                }
+        if self._start_apps_cache is None:
+            self._start_apps_cache = start_apps_catalog()
+        match = match_start_app(query, self._start_apps_cache)
+        if match:
+            tried.append(f"appsfolder:{match['appid']}")
+            if start_apps_folder(match["appid"]):
+                return {
+                    "ok": True,
+                    "method": "appsfolder",
+                    "started": match["name"],
+                    "appid": match["appid"],
+                    "tried": tried,
+                    "hint": "Wait for the window, then list_ui.",
+                }
+        return {
+            "ok": False,
+            "error": (
+                f"Could not find an installed app matching {query!r}. "
+                "Win+R only works for names on PATH. Dismiss any 'Windows cannot find' "
+                "dialog, then search Start (hotkey win, type the name, enter)."
+            ),
+            "tried": tried[:16],
         }
 
     def _window_meta(self, window: Any) -> dict[str, Any]:
