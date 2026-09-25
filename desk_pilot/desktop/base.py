@@ -29,11 +29,16 @@ class DesktopBackend(ABC):
 
     def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> dict[str, Any]:
         """Persistent sketch overlay for guide mode. Returns {ok, skipped, error, rect}."""
-        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, rect_skip_reason, sketchable_rect
 
-        box = as_rect(rect)
+        box = sketchable_rect(rect)
         if not box:
-            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+            return {
+                "ok": False,
+                "skipped": True,
+                "error": rect_skip_reason(rect) or SKIP_NO_RECT,
+                "rect": None,
+            }
         return {"ok": False, "skipped": True, "error": "overlay only on Windows", "rect": box}
 
     def hide_highlight(self) -> None:
