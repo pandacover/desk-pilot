@@ -37,19 +37,29 @@ class MockDesktop(DesktopBackend):
         self.run_text = ""
         self.actions: list[str] = []
         self.window_title = "Desktop"
+        self._missing_name = "app"
 
     def reset(self) -> None:
         self.__init__()
 
     def list_ui(self, max_depth: int = 5, max_controls: int = 70) -> dict[str, Any]:
+        from desk_pilot.desktop.launch import detect_run_not_found
+
         window, focused, controls = self._scene_tree()
-        return {
+        visible = controls[: max(1, max_controls)]
+        launch_error = detect_run_not_found(window, visible)
+        payload: dict[str, Any] = {
+            "ok": not bool(launch_error),
             "dry_run": True,
             "window": window,
             "focused": focused,
-            "controls": controls[: max(1, max_controls)],
-            "hint": "Dry-run backend. No real mouse/keyboard. Win+R then notepad+Enter opens fake Notepad.",
+            "controls": visible,
+            "hint": "Dry-run backend. No real mouse/keyboard. Prefer launch_app; Win+R then notepad+Enter still opens fake Notepad.",
         }
+        if launch_error:
+            payload["launch_error"] = launch_error
+            payload["error"] = f"Win+R failed: {launch_error}"
+        return payload
 
     def click(
         self,
@@ -67,6 +77,9 @@ class MockDesktop(DesktopBackend):
             if aid in {"start", "startbutton"} or n in {"start", "start menu"}:
                 self.scene = "start"
                 self.window_title = "Start"
+            elif n in {"ok", "close"} and self.scene == "run_error":
+                self.scene = "desktop"
+                self.window_title = "Desktop"
             elif n in {"notepad"} or aid == "notepad_tile":
                 self._open_notepad()
             return {"ok": True, "dry_run": True, "clicked": target, "window": self.window_title}
@@ -107,10 +120,29 @@ class MockDesktop(DesktopBackend):
             self.run_text = ""
             self.window_title = "Run"
             return {"ok": True, "dry_run": True, "keys": chord, "window": "Run"}
+        if chord in {"win", "meta", "cmd"}:
+            self.scene = "start"
+            self.edit_text = ""
+            self.window_title = "Start"
+            return {"ok": True, "dry_run": True, "keys": chord, "window": "Start"}
         if chord in {"enter", "return"}:
+            if self.scene == "run_error":
+                self.scene = "desktop"
+                self.window_title = "Desktop"
+                return {"ok": True, "dry_run": True, "keys": chord, "window": "Desktop", "note": "Dismissed launch-error dialog."}
             if self.scene == "run" and "notepad" in self.run_text.lower():
                 self._open_notepad()
                 return {"ok": True, "dry_run": True, "keys": chord, "window": "Untitled - Notepad"}
+            if self.scene == "run":
+                self._open_run_not_found(self.run_text)
+                return {
+                    "ok": False,
+                    "dry_run": True,
+                    "keys": chord,
+                    "launch_error": True,
+                    "window": self.window_title,
+                    "error": f"Windows cannot find '{self._missing_name}'. Make sure you typed the name correctly, and then try again.",
+                }
             if self.scene == "start" and "notepad" in self.edit_text.lower():
                 self._open_notepad()
                 return {"ok": True, "dry_run": True, "keys": chord, "window": "Untitled - Notepad"}
@@ -147,12 +179,27 @@ class MockDesktop(DesktopBackend):
         title_contains: str | None = None,
         timeout_seconds: float = 8.0,
     ) -> dict[str, Any]:
+        from desk_pilot.desktop.launch import detect_run_not_found
+
+        window, _focused, controls = self._scene_tree()
+        launch_error = detect_run_not_found(window, controls)
+        if launch_error:
+            return {
+                "ok": False,
+                "dry_run": True,
+                "launch_error": launch_error,
+                "window": self.window_title,
+                "error": (
+                    f"Foreground is a launch-failure dialog, not {title_contains!r}. "
+                    f"{launch_error}. Dismiss it, then call launch_app."
+                ),
+            }
         needle = (title_contains or "").lower()
         if not needle or needle in self.window_title.lower():
             return {"ok": True, "dry_run": True, "window": self.window_title}
         deadline = time.time() + max(0.1, float(timeout_seconds))
         while time.time() < deadline:
-            if needle in self.window_title.lower():
+            if needle in self.window_title.lower() and self.scene != "run_error":
                 return {"ok": True, "dry_run": True, "window": self.window_title}
             time.sleep(0.05)
         return {
@@ -161,10 +208,40 @@ class MockDesktop(DesktopBackend):
             "error": f"Timed out waiting for title containing {title_contains!r}. Foreground is {self.window_title!r}.",
         }
 
+    def launch_app(self, name: str) -> dict[str, Any]:
+        query = (name or "").strip()
+        self.actions.append(f"launch_app {query!r}")
+        key = query.lower().replace(".exe", "")
+        if "notepad" in key:
+            self._open_notepad()
+            return {
+                "ok": True,
+                "dry_run": True,
+                "method": "mock_catalog",
+                "started": "notepad",
+                "window": self.window_title,
+            }
+        self._open_run_not_found(query)
+        return {
+            "ok": False,
+            "dry_run": True,
+            "launch_error": True,
+            "error": (
+                f"Windows cannot find '{query}'. Make sure you typed the name correctly, "
+                "and then try again."
+            ),
+            "hint": "Dismiss the dialog, then try Start search or another name. Dry-run catalog includes notepad.",
+        }
+
     def _open_notepad(self) -> None:
         self.scene = "notepad"
         self.edit_text = ""
         self.window_title = "Untitled - Notepad"
+
+    def _open_run_not_found(self, typed: str) -> None:
+        self._missing_name = (typed or "app").strip() or "app"
+        self.scene = "run_error"
+        self.window_title = self._missing_name
 
     def _find(self, automation_id: str | None, name: str | None) -> dict[str, Any] | None:
         _, _, controls = self._scene_tree()
@@ -220,6 +297,21 @@ class MockDesktop(DesktopBackend):
                 focused,
                 _ctrl(name="Notepad", ctype="ListItem", aid="notepad_tile", rect=[20, 70, 160, 110], path="Start/Notepad"),
                 _ctrl(name="Settings", ctype="ListItem", aid="settings_tile", rect=[20, 120, 160, 160], path="Start/Settings"),
+            ]
+            return window, focused, controls
+        if self.scene == "run_error":
+            missing = getattr(self, "_missing_name", "app")
+            title = missing
+            window = {"name": title, "type": "Window", "class": "#32770"}
+            message = (
+                f"Windows cannot find '{missing}'. Make sure you typed the name correctly, "
+                "and then try again."
+            )
+            focused = _ctrl(name="OK", ctype="Button", aid="2", rect=[180, 110, 250, 138], path=f"{title}/OK")
+            controls = [
+                _ctrl(name=title, ctype="Window", aid="Error", rect=[40, 40, 420, 180], path=title),
+                _ctrl(name=message, ctype="Text", aid="65535", rect=[50, 60, 400, 100], path=f"{title}/Message"),
+                focused,
             ]
             return window, focused, controls
         window = {"name": "Desktop", "type": "Pane", "class": "#32769"}
