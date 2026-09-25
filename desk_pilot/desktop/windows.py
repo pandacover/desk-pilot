@@ -53,7 +53,7 @@ def _escape_sendkeys(text: str) -> str:
     out: list[str] = []
     for ch in text:
         if ch == "{":
-            out.append("{{}")
+            out.append("{{")
         elif ch == "}":
             out.append("{}}")
         else:
@@ -807,7 +807,7 @@ class WindowsDesktop(DesktopBackend):
         x: int | None = None,
         y: int | None = None,
     ) -> list[int] | None:
-        from desk_pilot.desktop.rects import as_rect
+        from desk_pilot.desktop.rects import sketchable_rect, xy_pad_rect
 
         prep = self._prepare()
         if prep:
@@ -815,15 +815,13 @@ class WindowsDesktop(DesktopBackend):
         if automation_id or name:
             control = self._find_control(automation_id, name)
             if control is not None:
-                box = as_rect(_rect_list(getattr(control, "BoundingRectangle", None)))
+                box = sketchable_rect(_rect_list(getattr(control, "BoundingRectangle", None)))
                 if box:
                     return box
-        if x is not None and y is not None:
-            return as_rect([int(x) - 12, int(y) - 12, int(x) + 12, int(y) + 12])
-        return None
+        return xy_pad_rect(x, y, pad=12)
 
     def focused_window_rect(self) -> list[int] | None:
-        from desk_pilot.desktop.rects import as_rect
+        from desk_pilot.desktop.rects import sketchable_rect
 
         prep = self._prepare()
         if prep:
@@ -834,11 +832,11 @@ class WindowsDesktop(DesktopBackend):
             return None
         if window is None:
             return None
-        return as_rect(_rect_list(getattr(window, "BoundingRectangle", None)))
+        return sketchable_rect(_rect_list(getattr(window, "BoundingRectangle", None)))
 
     def window_rect_by_title(self, title: str) -> list[int] | None:
         from desk_pilot.desktop.launch import is_agent_window, window_match_score
-        from desk_pilot.desktop.rects import as_rect
+        from desk_pilot.desktop.rects import sketchable_rect
 
         query = (title or "").strip()
         if not query:
@@ -860,7 +858,7 @@ class WindowsDesktop(DesktopBackend):
             )
             if score < 40:
                 continue
-            box = as_rect(_rect_list(getattr(control, "BoundingRectangle", None)))
+            box = sketchable_rect(_rect_list(getattr(control, "BoundingRectangle", None)))
             if not box:
                 continue
             if best is None or score > best[0]:
@@ -869,11 +867,16 @@ class WindowsDesktop(DesktopBackend):
 
     def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> dict[str, Any]:
         from desk_pilot.desktop.overlay import get_overlay
-        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, rect_skip_reason, sketchable_rect
 
-        box = as_rect(rect)
+        box = sketchable_rect(rect)
         if not box:
-            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+            return {
+                "ok": False,
+                "skipped": True,
+                "error": rect_skip_reason(rect) or SKIP_NO_RECT,
+                "rect": None,
+            }
         try:
             result = get_overlay().show(box)
         except Exception as exc:  # noqa: BLE001 — overlay create/blit must reach the log
