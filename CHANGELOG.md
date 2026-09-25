@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- **find_files** (auto mode): search the local disk (user profile, Desktop, Documents, Downloads, Program Files, Program Files (x86), Steam/common if present) by filename or glob. Returns full paths with size/mtime. The system prompt tells the model to call this first for “find/locate a file/.exe on my computer” — not Win+S into Edge, and not Explorer search-box hunting.
+- **Navigation verify**: after typing a URL/query and Enter, the loop checks that the window title and/or address-bar UIA value changed toward the target (`nav_ok` / `nav_failed`). A stale title is a failure. One retry (`ctrl+l`, clear, retype, enter), then `screenshot_region`.
+- **Image download discipline**: never Ctrl+S on a search/results page (that saves HTML). Prefer Save image as / a download control. New **verify_file** tool rejects HTML masquerading as `.jpg` (magic bytes / size).
+- **Stuck-loop breaker**: if the same tool+args fail, or the observe snapshot fingerprint is unchanged, for 3 consecutive acts, the next planner message forces a strategy change (`find_files`, screenshot, or fail) instead of grinding to `max_steps`.
+
 ## 0.2.0-rc
 
 - **Drag tool** (auto mode only): mouse-down `(x1,y1)` → move → up `(x2,y2)`, optional polyline `points` for rects and ellipses. Windows uses pynput; the dry-run mock records strokes. Not offered in Guide mode.

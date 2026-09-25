@@ -131,7 +131,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "hotkey",
             "description": (
-                "Send a keyboard shortcut. Examples: win+r, enter, ctrl+s, alt+f4, ctrl+a, tab."
+                "Send a keyboard shortcut. Examples: win+r, enter, ctrl+l (browser address bar), "
+                "tab, ctrl+a, alt+f4. Do NOT use ctrl+s to download a picture from a search/"
+                "results page — that saves HTML. Prefer Save image as / a download control."
             ),
             "parameters": {
                 "type": "object",
@@ -240,6 +242,62 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "find_files",
+            "description": (
+                "Search the local filesystem (user profile, Desktop, Documents, Downloads, "
+                "Program Files, Program Files (x86), Steam/common if present) for a file. "
+                "Use this FIRST when the user wants to find/locate a file or .exe on this "
+                "computer. Pass name (e.g. brawlhalla.exe) or glob (*.exe). Returns full paths "
+                "with size and mtime. Do not Win+S the filename into web search."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Filename or substring, e.g. brawlhalla.exe",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Optional glob, e.g. *.exe or *Brawlhalla*",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Cap results (default 20, max 50).",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verify_file",
+            "description": (
+                "Check a saved path on disk. For image downloads, rejects HTML masquerading "
+                "as .jpg/.png (magic bytes / size). Call this after a purported image save."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Full path of the file to check.",
+                    },
+                    "expect": {
+                        "type": "string",
+                        "description": "any (default) or image / jpg / png.",
+                    },
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "guide_step",
             "description": (
                 "Guide mode only: highlight one control or window and tell the human what to do. "
@@ -323,7 +381,7 @@ GUIDE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     item for item in TOOL_DEFINITIONS if item["function"]["name"] in GUIDE_TOOL_NAMES
 ]
 # drag / prepare_art are never offered in guide mode and must not execute if hallucinated.
-AUTO_ONLY_TOOLS = frozenset({"drag", "prepare_art"})
+AUTO_ONLY_TOOLS = frozenset({"drag", "prepare_art", "find_files", "verify_file"})
 
 
 class TerminalCall:
@@ -419,6 +477,21 @@ def dispatch_tool(
             title_contains=_opt_str(args.get("title_contains")),
             timeout_seconds=timeout_f,
         )
+    if name == "find_files":
+        max_results = args.get("max_results", 20)
+        try:
+            limit = int(max_results)
+        except (TypeError, ValueError):
+            limit = 20
+        return backend.find_files(
+            name=_opt_str(args.get("name")),
+            glob=_opt_str(args.get("glob")),
+            max_results=limit,
+        )
+    if name == "verify_file":
+        from desk_pilot.desktop.files import verify_file
+
+        return verify_file(_opt_str(args.get("path")), expect=_opt_str(args.get("expect")) or "any")
     if name == "guide_step":
         return _guide_step_payload(backend, args)
     if name == "done":

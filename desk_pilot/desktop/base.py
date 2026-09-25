@@ -110,3 +110,14 @@ class DesktopBackend(ABC):
     @abstractmethod
     def launch_app(self, name: str) -> dict[str, Any]:
         """Start an installed app, or focus it if it is already open."""
+
+    def find_files(
+        self,
+        name: str | None = None,
+        glob: str | None = None,
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        """Search common filesystem roots for a filename or glob."""
+        from desk_pilot.desktop.files import find_files as search
+
+        return search(name=name, glob=glob, max_results=max_results)

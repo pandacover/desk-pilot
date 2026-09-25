@@ -39,7 +39,10 @@ from desk_pilot.agent.tools import (
     dispatch_tool,
     parse_arguments,
 )
+from desk_pilot.agent.nav import looks_like_navigation, nav_fingerprint, verify_enter_navigation
+from desk_pilot.agent.stuck import StuckTracker, snapshot_fingerprint
 from desk_pilot.desktop.base import DesktopBackend
+from desk_pilot.desktop.files import is_image_download_goal, looks_like_image_path, verify_file
 from desk_pilot.llm.openrouter import LLMClient, LLMError
 
 
@@ -85,6 +88,9 @@ class AgentLoop:
         self.canvas_mode = (not self.guide_mode) and is_art_goal(goal)
         self._target_title = ""
         self._target_process = ""
+        self._stuck = StuckTracker()
+        self._pending_nav_text: str | None = None
+        self._pending_save_path: str | None = None
         self._log("info", f"Goal: {goal}")
         if self.guide_mode:
             self._log(
@@ -102,6 +108,7 @@ class AgentLoop:
         snapshot = self.backend.list_ui()
         self._last_snapshot = snapshot
         self._remember_target(snapshot)
+        self._stuck.last_fp = snapshot_fingerprint(snapshot)
         if (not self.guide_mode) and should_use_canvas_mode(goal, snapshot):
             self._enable_canvas("thin UIA tree or art/canvas window")
         system = self._system_prompt()
@@ -150,7 +157,7 @@ class AgentLoop:
                         if self.canvas_mode
                         else (
                             "You must call a tool: list_windows, focus_window, launch_app, "
-                            "an action, wait_for_window, done, or fail."
+                            "find_files, verify_file, an action, wait_for_window, done, or fail."
                         )
                     )
                 )
@@ -168,6 +175,7 @@ class AgentLoop:
             terminal: TerminalCall | None = None
             screenshot_path: str | None = None
             guided = False
+            turn_events: list[dict[str, Any]] = []
             for call in tool_calls:
                 if self._stopped():
                     self._clear_guide()
@@ -199,14 +207,11 @@ class AgentLoop:
                         return RunResult("stopped", "Stopped by user.", step, self.backend.dry_run)
                     break
                 self._log("act", f"{name} {compact_json(args, 400)}")
-                extra = {
-                    "llm": self.llm,
-                    "window_rect": self._window_rect(),
-                }
-                result = dispatch_tool(self.backend, name, args, extra=extra)
+                result = self._dispatch_action(name, args)
                 if isinstance(result, TerminalCall):
                     terminal = result
                     tool_body = compact_json(result.payload)
+                    turn_events.append({"name": name, "args": args, "ok": True})
                 else:
                     if name not in {"list_ui", "list_windows", "focus_window", "done", "fail"}:
                         restored = self._restore_focus_if_stolen()
@@ -216,7 +221,18 @@ class AgentLoop:
                     tool_body = compact_json(result)
                     if name == "screenshot_region" and result.get("ok") and result.get("path"):
                         screenshot_path = str(result["path"])
+                    if isinstance(result, dict) and result.get("screenshot") and not screenshot_path:
+                        screenshot_path = str(result["screenshot"])
+                    if isinstance(result, dict) and result.get("nav_failed"):
+                        self._log("error", result.get("reason") or "nav_failed")
                     self._remember_target_from_result(name, result)
+                    turn_events.append(
+                        {
+                            "name": name,
+                            "args": args,
+                            "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
+                        }
+                    )
                 self._messages.append(
                     {
                         "role": "tool",
@@ -256,6 +272,10 @@ class AgentLoop:
             playbook = ""
             if self.canvas_mode:
                 playbook = playbook_hint(art_subject(getattr(self, "_goal", "")), self._window_rect())
+            notice = ""
+            if (not self.guide_mode) and turn_events and self._stuck.note(turn_events, snapshot):
+                notice = self._stuck.message()
+                self._log("error", notice.split(".")[0] + ".")
             self._messages.append(
                 {
                     "role": "user",
@@ -266,6 +286,7 @@ class AgentLoop:
                         guide=self.guide_mode,
                         canvas=self.canvas_mode,
                         playbook=playbook,
+                        notice=notice,
                     ),
                 }
             )
@@ -458,6 +479,84 @@ class AgentLoop:
         if self.canvas_mode:
             return CANVAS_SYSTEM_PROMPT
         return SYSTEM_PROMPT
+
+    def _dispatch_action(self, name: str, args: dict[str, Any]) -> dict[str, Any] | TerminalCall:
+        extra = {
+            "llm": self.llm,
+            "window_rect": self._window_rect(),
+        }
+        keys = str(args.get("keys") or "").strip().lower().replace(" ", "")
+        if name == "type_text":
+            text = str(args.get("text") or "")
+            snap = getattr(self, "_last_snapshot", None)
+            if looks_like_navigation(text, snap if isinstance(snap, dict) else None):
+                self._pending_nav_text = text
+            if looks_like_image_path(text):
+                self._pending_save_path = text.strip().strip('"')
+            return dispatch_tool(self.backend, name, args, extra=extra)
+        if (
+            name == "hotkey"
+            and keys in {"enter", "return"}
+            and getattr(self, "_pending_nav_text", None)
+            and not self.guide_mode
+        ):
+            before = nav_fingerprint(getattr(self, "_last_snapshot", None) if isinstance(getattr(self, "_last_snapshot", None), dict) else None)
+            try:
+                before = nav_fingerprint(self.backend.list_ui(max_depth=3, max_controls=40))
+            except Exception:
+                pass
+            result = dispatch_tool(self.backend, name, args, extra=extra)
+            if isinstance(result, TerminalCall):
+                return result
+            checked = verify_enter_navigation(
+                self.backend,
+                str(self._pending_nav_text),
+                before,
+                result if isinstance(result, dict) else {"ok": bool(result)},
+                log=self._log,
+            )
+            self._pending_nav_text = None
+            return self._maybe_verify_saved_image(checked, keys)
+        result = dispatch_tool(self.backend, name, args, extra=extra)
+        if isinstance(result, TerminalCall):
+            return result
+        if name == "hotkey" and keys in {"ctrl+s"}:
+            result = self._annotate_ctrl_s(result if isinstance(result, dict) else {"ok": bool(result)})
+        if name == "hotkey" and keys in {"enter", "return", "ctrl+s"}:
+            result = self._maybe_verify_saved_image(
+                result if isinstance(result, dict) else {"ok": bool(result)},
+                keys,
+            )
+        return result
+
+    def _annotate_ctrl_s(self, result: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(result)
+        if is_image_download_goal(getattr(self, "_goal", "")):
+            warning = (
+                "ctrl+s on a search/results page saves HTML, not an image. "
+                "Open the image and use Save image as / a download control, then verify_file."
+            )
+            payload["warning"] = warning
+            self._log("act", warning)
+        return payload
+
+    def _maybe_verify_saved_image(self, result: dict[str, Any], keys: str) -> dict[str, Any]:
+        path = getattr(self, "_pending_save_path", None)
+        if not path:
+            return result
+        if keys not in {"enter", "return", "ctrl+s"}:
+            return result
+        if not (is_image_download_goal(getattr(self, "_goal", "")) or looks_like_image_path(path)):
+            return result
+        checked = verify_file(path, expect="image")
+        payload = dict(result)
+        payload["verify_file"] = checked
+        if not checked.get("ok"):
+            payload["ok"] = False
+            payload["error"] = checked.get("error") or "Saved file is not a real image."
+            self._log("error", payload["error"])
+        self._pending_save_path = None
+        return payload
 
     def _enable_canvas(self, reason: str) -> None:
         if self.guide_mode or self.canvas_mode:

@@ -24,6 +24,8 @@ class ToolDispatchTests(unittest.TestCase):
                 "focus_window",
                 "launch_app",
                 "wait_for_window",
+                "find_files",
+                "verify_file",
                 "guide_step",
                 "done",
                 "fail",
@@ -152,6 +154,28 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertFalse(result.get("clipboard"))
         self.assertTrue(result.get("playbook"))
         self.assertEqual(self.desk.clipboard_image, result["path"])
+
+    def test_dispatch_find_files_brawlhalla(self) -> None:
+        result = dispatch_tool(self.desk, "find_files", {"name": "brawlhalla.exe"})
+        self.assertTrue(result["ok"])
+        paths = [item["path"].lower() for item in result["results"]]
+        self.assertTrue(any(p.endswith("brawlhalla.exe") for p in paths))
+        self.assertFalse(any("edge" in p for p in paths))
+
+    def test_dispatch_find_files_requires_name(self) -> None:
+        result = dispatch_tool(self.desk, "find_files", {})
+        self.assertFalse(result["ok"])
+
+    def test_dispatch_verify_file_html_as_jpg(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "cat.jpg"
+            path.write_bytes(b"<!DOCTYPE html><html><body>search results</body></html>")
+            result = dispatch_tool(self.desk, "verify_file", {"path": str(path), "expect": "image"})
+            self.assertFalse(result["ok"])
+            self.assertIn("html", (result.get("error") or "").lower())
 
 
 if __name__ == "__main__":

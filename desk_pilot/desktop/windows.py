@@ -775,15 +775,37 @@ class WindowsDesktop(DesktopBackend):
             if len(name) > 80:
                 name = name[:77] + "…"
             path = self._path(control, root)
-            return {
+            item = {
                 "name": name,
                 "type": _short_type(ctype),
                 "automation_id": aid,
                 "rect": _rect_list(control.BoundingRectangle),
                 "path": path,
             }
+            value = self._control_value(control, ctype)
+            if value:
+                item["value"] = value
+            return item
         except Exception:
             return None
+
+    def _control_value(self, control: Any, ctype: str) -> str:
+        if ctype not in {"EditControl", "ComboBoxControl", "DocumentControl"}:
+            return ""
+        try:
+            pattern = control.GetPattern(self.auto.PatternId.ValuePattern)
+        except Exception:
+            return ""
+        if pattern is None:
+            return ""
+        try:
+            raw = pattern.Value or ""
+        except Exception:
+            return ""
+        text = str(raw).strip()
+        if len(text) > 160:
+            return text[:157] + "…"
+        return text
 
     def _path(self, control: Any, root: Any, limit: int = 4) -> str:
         parts: list[str] = []
