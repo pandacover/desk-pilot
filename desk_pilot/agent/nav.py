@@ -291,26 +291,60 @@ def run_navigate(
         )
 
     address = address_control_from_snapshot(snapshot)
-    if not address:
-        after = nav_fingerprint(snapshot)
-        return _nav_payload(
-            ok=False,
-            reason="missing address control: no Chromium address Edit/ComboBox in the UIA tree",
-            target=target,
-            before=after,
-            after=after,
-        )
+    extra: dict[str, Any] = {}
+    aid: str | None = None
+    name: str | None = None
+    if address:
+        aid = str(address.get("automation_id") or "").strip() or None
+        name = str(address.get("name") or "").strip() or None
+        extra["method"] = "uia"
+        extra["address_control"] = {"name": name, "automation_id": aid}
+        if log:
+            log("act", f"NAV address control: name={name!r} automation_id={aid!r}")
+        try:
+            backend.click(automation_id=aid, name=name)
+        except Exception:
+            pass
+    else:
+        extra["method"] = "omnibox"
+        extra["omnibox_fallback"] = True
+        extra["address_control"] = None
+        if log:
+            log("act", "NAV no address Edit/ComboBox in UIA tree; ctrl+l omnibox fallback")
+        try:
+            backend.hotkey("ctrl+l")
+        except Exception as exc:
+            extra["omnibox_error"] = str(exc)
+            if log:
+                log("error", f"NAV ctrl+l failed: {exc}")
+    return _commit_navigation(
+        backend,
+        target,
+        automation_id=aid,
+        name=name,
+        log=log,
+        extra=extra,
+    )
 
-    aid = str(address.get("automation_id") or "").strip() or None
-    name = str(address.get("name") or "").strip() or None
-    if log:
-        log("act", f"NAV address control: name={name!r} automation_id={aid!r}")
+
+def _commit_navigation(
+    backend: Any,
+    target: str,
+    *,
+    automation_id: str | None = None,
+    name: str | None = None,
+    log=None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Type into the address/omnibox, Enter, then poll title/address (0.2.1 verify)."""
+    extra = dict(extra or {})
     try:
-        backend.click(automation_id=aid, name=name)
-    except Exception:
-        pass
-    try:
-        typed = backend.type_text(str(target), automation_id=aid, name=name, clear=True)
+        typed = backend.type_text(
+            str(target),
+            automation_id=automation_id,
+            name=name,
+            clear=True,
+        )
     except Exception as exc:
         after = nav_fingerprint(_snapshot(backend))
         return _nav_payload(
@@ -318,18 +352,20 @@ def run_navigate(
             reason=f"navigate could not type the URL: {exc}",
             target=target,
             after=after,
+            extra=extra,
         )
     if isinstance(typed, dict) and typed.get("ok") is False:
         after = nav_fingerprint(_snapshot(backend))
+        extra["typed"] = typed
         return _nav_payload(
             ok=False,
             reason=str(typed.get("error") or "navigate could not type the URL."),
             target=target,
             after=after,
-            extra={"typed": typed},
+            extra=extra,
         )
 
-    before = nav_fingerprint(_snapshot(backend) or snapshot)
+    before = nav_fingerprint(_snapshot(backend))
     try:
         enter_result = backend.hotkey("enter")
     except Exception as exc:
@@ -343,6 +379,8 @@ def run_navigate(
     checked["address"] = str((after or {}).get("address") or checked.get("address") or "")[:240]
     checked["target"] = target
     checked["window"] = checked["title"]
+    for key, value in extra.items():
+        checked.setdefault(key, value)
     if checked.get("nav_ok"):
         checked["ok"] = True
         checked["nav_failed"] = False

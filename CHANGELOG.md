@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.3
+
+- **navigate omnibox fallback**: if the Chromium address Edit/ComboBox is missing from a thin UIA tree (~10 chrome controls, common in Helium), `navigate` stays atomic — `ctrl+l`, type the URL (select-all/clear), Enter, then the existing title/address poll. It no longer returns `missing address control` and dumps the sequence on the planner.
+
 ## 0.2.2
 
 - **navigate** (auto mode): one atomic tool to change a Chromium-family browser (Helium / Chrome / Edge) to a URL. Focuses the window (optional `title_contains` / `process_contains`), finds the address Edit/ComboBox via UIA, types the URL, presses Enter, and polls title/address until `nav_ok` or `nav_failed`. Reuses the 0.2.1 verify helpers. Other browsers return a clear failure. Prompt tells the model to call `navigate` instead of splitting `ctrl+l` / `type_text` / Enter across turns.

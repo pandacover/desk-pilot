@@ -208,10 +208,12 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "navigate",
             "description": (
                 "Change a Chromium-family browser window (Helium, Chrome, Edge) to a URL "
-                "in one step: focus the window, find the address bar via UI Automation, "
-                "type the URL, press Enter, and verify the title/address actually changed. "
-                "Use this whenever the browser needs a different URL. Other browsers return "
-                "nav_failed. Optional title_contains / process_contains pick the window."
+                "in one step: focus the window, type into the address bar, press Enter, "
+                "and verify the title/address actually changed. If the address Edit/ComboBox "
+                "is missing from the UIA tree, the same call focuses the omnibox (ctrl+l) "
+                "and continues. Use this whenever the browser needs a different URL. Other "
+                "browsers return nav_failed. Optional title_contains / process_contains pick "
+                "the window."
             ),
             "parameters": {
                 "type": "object",
