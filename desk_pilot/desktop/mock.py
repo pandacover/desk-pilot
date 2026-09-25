@@ -41,6 +41,8 @@ class MockDesktop(DesktopBackend):
         self._open_apps: dict[str, dict[str, str]] = {}
         self.highlights: list[list[int]] = []
         self.highlight_visible: list[int] | None = None
+        self.fail_highlight = False
+        self.fail_highlight_error = "UpdateLayeredWindow failed (GetLastError=87)"
 
     def reset(self) -> None:
         self.__init__()
@@ -289,19 +291,67 @@ class MockDesktop(DesktopBackend):
         x: int | None = None,
         y: int | None = None,
     ) -> list[int] | None:
+        from desk_pilot.desktop.rects import as_rect
+
         target = self._find(automation_id, name)
-        if target and isinstance(target.get("rect"), list) and len(target["rect"]) >= 4:
-            return [int(v) for v in target["rect"][:4]]
+        if target:
+            box = as_rect(target.get("rect"))
+            if box:
+                return box
         if x is not None and y is not None:
-            return [int(x) - 10, int(y) - 10, int(x) + 10, int(y) + 10]
+            return as_rect([int(x) - 10, int(y) - 10, int(x) + 10, int(y) + 10])
         return None
 
-    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> None:
-        if not rect or len(rect) < 4:
-            return
-        box = [int(v) for v in list(rect)[:4]]
+    def focused_window_rect(self) -> list[int] | None:
+        from desk_pilot.desktop.rects import as_rect
+
+        window, focused, controls = self._scene_tree()
+        title = (window.get("name") or self.window_title or "").strip()
+        for item in controls:
+            if (item.get("type") or "") not in {"Window", "Pane"}:
+                continue
+            if title and (item.get("name") or "") != title:
+                continue
+            box = as_rect(item.get("rect"))
+            if box:
+                return box
+        for item in controls:
+            if (item.get("type") or "") in {"Window", "Pane"}:
+                box = as_rect(item.get("rect"))
+                if box:
+                    return box
+        return as_rect((focused or {}).get("rect"))
+
+    def window_rect_by_title(self, title: str) -> list[int] | None:
+        from desk_pilot.desktop.rects import as_rect
+
+        needle = (title or "").strip().lower()
+        if not needle:
+            return None
+        _window, _focused, controls = self._scene_tree()
+        for item in controls:
+            if needle in (item.get("name") or "").lower():
+                box = as_rect(item.get("rect"))
+                if box:
+                    return box
+        return self.focused_window_rect()
+
+    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> dict[str, Any]:
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+
+        box = as_rect(rect)
+        if not box:
+            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+        if self.fail_highlight:
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": self.fail_highlight_error,
+                "rect": box,
+            }
         self.highlights.append(box)
         self.highlight_visible = box
+        return {"ok": True, "skipped": False, "dry_run": True, "error": None, "rect": box}
 
     def hide_highlight(self) -> None:
         self.highlight_visible = None
