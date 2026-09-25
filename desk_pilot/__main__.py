@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mock", action="store_true", help="Force the dry-run desktop stub.")
     parser.add_argument("--model", type=str, help="OpenRouter model id (default openai/gpt-6-luna).")
     parser.add_argument("--max-steps", type=int, dest="max_steps", help="Hard step budget (default 30).")
+    parser.add_argument("--guide", action="store_true", help="Force guide / how-to mode (you act; the agent sketches).")
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     return parser
 
@@ -50,13 +51,22 @@ def _run_cli(args: argparse.Namespace, *, force_mock: bool) -> int:
         )
         return 2
     backend = get_backend(force_mock=force_mock)
-    backend.highlight_overlay = settings.highlight_overlay
     model = args.model or settings.model or DEFAULT_MODEL
     max_steps = args.max_steps or settings.max_steps or DEFAULT_MAX_STEPS
     client = OpenRouterClient(key, model, reasoning_effort=settings.reasoning_effort or "low")
+    force_guide = bool(args.guide) or settings.guide_mode
 
     def log(kind: str, message: str) -> None:
         print(f"[{kind}] {message}", flush=True)
+
+    def await_step() -> str:
+        if sys.stdin.isatty():
+            try:
+                input("Press Enter when you have done this step (or Ctrl+C to stop)… ")
+            except EOFError:
+                return "continue"
+            return "continue"
+        return "continue"
 
     from desk_pilot.desktop.com import com_thread
 
@@ -67,6 +77,8 @@ def _run_cli(args: argparse.Namespace, *, force_mock: bool) -> int:
                 llm=client,
                 max_steps=max_steps,
                 on_log=log,
+                force_guide=force_guide,
+                await_step=await_step,
             ).run(goal)
     finally:
         client.close()

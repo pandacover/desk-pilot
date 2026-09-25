@@ -11,6 +11,7 @@ import customtkinter as ctk
 
 from desk_pilot import APP_NAME, DEFAULT_MAX_STEPS, DEFAULT_MODEL, __version__
 from desk_pilot.agent.loop import AgentLoop, RunResult
+from desk_pilot.agent.guide import is_guide_goal
 from desk_pilot.app.config import Settings, load_settings, save_settings
 from desk_pilot.desktop import get_backend, is_windows
 from desk_pilot.llm.openrouter import OpenRouterClient
@@ -21,6 +22,7 @@ LOG_COLORS = {
     "observe": "#7fdbda",
     "plan": "#c4b5fd",
     "act": "#fbbf24",
+    "guide": "#fde68a",
     "done": "#4ade80",
     "fail": "#f87171",
     "error": "#f87171",
@@ -40,11 +42,12 @@ class DeskPilotApp(ctk.CTk):
         self.settings = load_settings()
         self.force_mock = force_mock
         self.backend = get_backend(force_mock=force_mock or not is_windows())
-        self.backend.highlight_overlay = self.settings.highlight_overlay
         self._log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._stop = threading.Event()
+        self._continue = threading.Event()
         self._worker: threading.Thread | None = None
         self._running = False
+        self._guide_waiting = False
 
         self._build()
         self._bind_keys()
@@ -96,6 +99,7 @@ class DeskPilotApp(ctk.CTk):
         buttons.grid(row=2, column=0, sticky="ew", padx=14, pady=12)
         buttons.grid_columnconfigure(0, weight=1)
         buttons.grid_columnconfigure(1, weight=2)
+        buttons.grid_columnconfigure(2, weight=1)
         self.run_btn = ctk.CTkButton(
             buttons,
             text="Run",
@@ -116,15 +120,35 @@ class DeskPilotApp(ctk.CTk):
             command=self._on_stop,
             state="disabled",
         )
-        self.stop_btn.grid(row=0, column=1, sticky="ew")
+        self.stop_btn.grid(row=0, column=1, sticky="ew", padx=(0, 8))
+        self.continue_btn = ctk.CTkButton(
+            buttons,
+            text="Continue",
+            height=48,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            fg_color="#1d4ed8",
+            hover_color="#1e3a8a",
+            command=self._on_continue,
+            state="disabled",
+        )
+        self.continue_btn.grid(row=0, column=2, sticky="ew")
+        self.guide_hint = ctk.CTkLabel(
+            goal_frame,
+            text="",
+            text_color="#fde68a",
+            wraplength=480,
+            anchor="w",
+            justify="left",
+        )
+        self.guide_hint.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 4))
         ctk.CTkLabel(
             goal_frame,
-            text="The agent will control this PC until you click STOP or it calls done/fail (max steps in Settings).",
+            text="Auto: the agent clicks for you. How-to goals (or Guide mode) sketch a step and wait until you click Continue.",
             text_color="#9aa3b2",
             wraplength=480,
             anchor="w",
             justify="left",
-        ).grid(row=3, column=0, sticky="w", padx=14, pady=(0, 12))
+        ).grid(row=4, column=0, sticky="w", padx=14, pady=(0, 12))
 
         settings = ctk.CTkFrame(self)
         settings.grid(row=1, column=1, sticky="nsew", padx=(8, 18), pady=8)
@@ -179,11 +203,11 @@ class DeskPilotApp(ctk.CTk):
             variable=self.confirm_var,
         ).grid(row=8, column=0, sticky="w", padx=14, pady=(8, 0))
 
-        self.overlay_var = tk.BooleanVar(value=self.settings.highlight_overlay)
+        self.guide_var = tk.BooleanVar(value=self.settings.guide_mode)
         ctk.CTkCheckBox(
             settings,
-            text="Sketch overlay on click/type",
-            variable=self.overlay_var,
+            text="Guide mode (you click; I sketch)",
+            variable=self.guide_var,
         ).grid(row=9, column=0, sticky="w", padx=14, pady=(6, 0))
 
         ctk.CTkButton(settings, text="Save settings", command=self._save_settings).grid(
@@ -209,6 +233,7 @@ class DeskPilotApp(ctk.CTk):
     def _bind_keys(self) -> None:
         self.bind("<Control-Return>", lambda _e: self._on_run())
         self.bind("<Escape>", lambda _e: self._on_stop())
+        self.bind("<F8>", lambda _e: self._on_continue())
 
     def _toggle_key(self) -> None:
         self.key_entry.configure(show="" if self.show_key.get() else "•")
@@ -240,13 +265,12 @@ class DeskPilotApp(ctk.CTk):
             max_steps=steps,
             reasoning_effort=self.settings.reasoning_effort or "low",
             confirm_before_run=bool(self.confirm_var.get()),
-            highlight_overlay=bool(self.overlay_var.get()),
+            guide_mode=bool(self.guide_var.get()),
         )
 
     def _save_settings(self) -> None:
         self.settings = self._read_form()
         path = save_settings(self.settings)
-        self.backend.highlight_overlay = self.settings.highlight_overlay
         self._log("info", f"Saved settings to {path}")
         self._refresh_status()
 
@@ -271,7 +295,14 @@ class DeskPilotApp(ctk.CTk):
             messagebox.showerror(APP_NAME, "Enter a goal, for example: Open Notepad and type hello")
             return
         if self.settings.confirm_before_run:
-            if self.backend.dry_run:
+            guiding = self.settings.guide_mode or is_guide_goal(goal)
+            if guiding:
+                prompt = (
+                    "Guide mode: Desk Pilot will sketch each step. You click and type. "
+                    "It will not move the mouse or keyboard for those steps.\n\n"
+                    f"Goal:\n{goal}\n\nContinue?"
+                )
+            elif self.backend.dry_run:
                 prompt = (
                     "Dry-run mode: Desk Pilot will not move the real mouse or keyboard.\n\n"
                     f"Goal:\n{goal}\n\nContinue?"
@@ -286,11 +317,13 @@ class DeskPilotApp(ctk.CTk):
                 self._log("info", "Run cancelled.")
                 return
         save_settings(self.settings)
-        self.backend.highlight_overlay = self.settings.highlight_overlay
         self._stop.clear()
+        self._continue.clear()
         self._running = True
+        self._guide_waiting = False
         self.run_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
+        self.continue_btn.configure(state="disabled")
         self.goal_box.configure(state="disabled")
         self._log("info", "Starting agent loop…")
         self._worker = threading.Thread(target=self._worker_run, args=(goal, key), daemon=True)
@@ -312,6 +345,9 @@ class DeskPilotApp(ctk.CTk):
                     max_steps=self.settings.max_steps,
                     on_log=lambda kind, msg: self._log_queue.put((kind, msg)),
                     stop_event=self._stop,
+                    force_guide=self.settings.guide_mode,
+                    continue_event=self._continue,
+                    on_guide_step=lambda text: self._log_queue.put(("_guide", text)),
                 )
                 result = agent.run(goal)
         except Exception as exc:  # noqa: BLE001
@@ -321,16 +357,36 @@ class DeskPilotApp(ctk.CTk):
             client.close()
         self._log_queue.put(("_finished", result.status + "\n" + result.message))
 
+    def _on_continue(self) -> None:
+        if not self._running or not self._guide_waiting:
+            return
+        self._continue.set()
+        self._log("guide", "Continue — next step.")
+
     def _on_stop(self) -> None:
         if not self._running:
             return
         self._stop.set()
+        self._continue.set()
         self._log("stop", "Stop requested — waiting for the current model/tool call to finish.")
+
+    def _set_guide_ui(self, instruction: str) -> None:
+        text = (instruction or "").strip()
+        self._guide_waiting = bool(text)
+        if text:
+            self.guide_hint.configure(text=f"Your turn: {text}  (Continue or F8 when done)")
+            self.continue_btn.configure(state="normal")
+        else:
+            self.guide_hint.configure(text="")
+            self.continue_btn.configure(state="disabled")
 
     def _finish_ui(self, payload: str) -> None:
         self._running = False
+        self._guide_waiting = False
         self.run_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
+        self.continue_btn.configure(state="disabled")
+        self.guide_hint.configure(text="")
         self.goal_box.configure(state="normal")
         status, _, message = payload.partition("\n")
         if status == "done":
@@ -350,6 +406,11 @@ class DeskPilotApp(ctk.CTk):
                 kind, message = self._log_queue.get_nowait()
                 if kind == "_finished":
                     self._finish_ui(message)
+                    continue
+                if kind == "_guide":
+                    self._set_guide_ui(message)
+                    if message:
+                        self._append_log("guide", message)
                     continue
                 self._append_log(kind, message)
         except queue.Empty:

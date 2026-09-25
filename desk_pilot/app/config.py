@@ -51,7 +51,7 @@ class Settings:
     max_steps: int = DEFAULT_MAX_STEPS
     reasoning_effort: str = "low"
     confirm_before_run: bool = True
-    highlight_overlay: bool = True
+    guide_mode: bool = False
 
     def masked_key(self) -> str:
         key = self.effective_api_key()
@@ -77,7 +77,7 @@ class Settings:
             "max_steps": int(self.max_steps) or DEFAULT_MAX_STEPS,
             "reasoning_effort": self.reasoning_effort or "low",
             "confirm_before_run": bool(self.confirm_before_run),
-            "highlight_overlay": bool(self.highlight_overlay),
+            "guide_mode": bool(self.guide_mode),
         }
 
 
@@ -106,7 +106,7 @@ def load_settings(path: Path | None = None) -> Settings:
         max_steps=max_steps,
         reasoning_effort=effort,
         confirm_before_run=_as_bool(data.get("confirm_before_run"), True),
-        highlight_overlay=_as_bool(data.get("highlight_overlay"), True),
+        guide_mode=_as_bool(data.get("guide_mode"), False),
     )
 
 
