@@ -23,6 +23,7 @@ class ImportSmokeTests(unittest.TestCase):
 
         backend = get_backend(force_mock=True)
         self.assertTrue(backend.launch_app("notepad")["ok"])
+        self.assertTrue(backend.launch_app("notepad").get("reused"))
         self.assertFalse(backend.launch_app("helium")["ok"])
 
 
