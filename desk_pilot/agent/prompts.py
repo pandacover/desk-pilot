@@ -8,16 +8,20 @@ Prefer structured UI trees over screenshots. Call screenshot_region only when li
 How to act
 - click: automation_id, then exact/visible name, then coordinates from rect [left,top,right,bottom].
 - type_text: literal characters into the focused or targeted control. Do not send shortcuts here.
-- hotkey: chords like win+r, enter, ctrl+s, alt+f4, tab, ctrl+a, win (Start).
-- launch_app: preferred way to open an installed program by display name (Helium, Chrome, Notepad, …).
+- hotkey: chords like win+r, enter, ctrl+s, alt+f4, tab, ctrl+a, win (Start), ctrl+l (browser address bar).
+- list_windows: top-level window titles and process names (not just the focused window).
+- focus_window: activate an already-open window by title or process. Use this instead of launching a second copy.
+- launch_app: start an installed program by display name only when no usable instance is open.
 - wait_for_window: after launching or switching apps. If the snapshot is a "Windows cannot find" dialog, that is NOT the app.
 - done / fail: end the run with a short result or reason.
 
-Opening apps on Windows
-1. Call launch_app with the app's visible name. It searches PATH, App Paths, Start Menu shortcuts, and shell:AppsFolder. Do not guess a filesystem path.
-2. Win+R is only for well-known PATH commands (notepad, cmd, calc). Typing a browser name like "helium" often fails with "Windows cannot find".
-3. If Win+R or launch_app fails, or list_ui shows "Windows cannot find": click OK / hotkey enter to dismiss the dialog, then try launch_app, then Start search (hotkey win, type_text the name, hotkey enter).
-4. Never wait_for_window on a name after a failed launch — look at list_ui first. A dialog titled the same as the app is still a failure.
+Opening / switching apps on Windows
+1. Read top_windows in the snapshot (and call list_windows if unsure). If the target app is already there, call focus_window and continue the goal. Do not launch another instance.
+2. launch_app will also focus an existing window when it finds one (look for reused=true) and must not start a second copy.
+3. Only launch when no matching top-level window exists. It searches PATH, App Paths, Start Menu shortcuts, and shell:AppsFolder. Do not guess a filesystem path.
+4. Win+R is only for well-known PATH commands (notepad, cmd, calc). Typing a browser name like "helium" often fails with "Windows cannot find".
+5. If Win+R or launch_app fails, or list_ui shows "Windows cannot find": click OK / hotkey enter to dismiss the dialog, then try focus_window, then launch_app, then Start search (hotkey win, type_text the name, hotkey enter).
+6. Never wait_for_window on a name after a failed launch — look at list_ui first. A dialog titled the same as the app is still a failure.
 
 If list_ui reports a COM / CoInitialize error, call list_ui once more. If it still fails, call fail with that error.
 
@@ -42,7 +46,8 @@ def user_goal_message(goal: str, snapshot: dict, dry_run: bool) -> str:
         f"{mode}\n\n"
         "Current UI (compact UIA tree):\n"
         f"{_dump(snapshot)}\n\n"
-        "Call a tool. Start with list_ui only if this snapshot is not enough."
+        "Call a tool. If top_windows already lists the target app, call focus_window; "
+        "do not launch a second copy. Start with list_ui only if this snapshot is not enough."
     )
 
 

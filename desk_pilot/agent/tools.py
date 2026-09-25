@@ -108,12 +108,47 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "list_windows",
+            "description": (
+                "List top-level windows (title, process) including ones that are not focused. "
+                "Use this before launch_app to reuse an already-open instance."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "focus_window",
+            "description": (
+                "Activate an already-open top-level window by title substring or process "
+                "name. Prefer this over launch_app when the app is already running."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title_contains": {
+                        "type": "string",
+                        "description": "Substring of the window title, e.g. Helium or Notepad.",
+                    },
+                    "process_contains": {
+                        "type": "string",
+                        "description": "Substring of the process stem, e.g. helium or notepad.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "launch_app",
             "description": (
-                "Start an installed Windows app by display name or executable. "
-                "Searches PATH, registry App Paths, Start Menu .lnk files, and "
-                "shell:AppsFolder. Prefer this over Win+R; Win+R fails when the "
-                "name is not on PATH (e.g. many browsers)."
+                "Start an installed Windows app by display name or executable only if it is "
+                "not already running. If a matching window exists, it is focused instead "
+                "(reused=true) and no second instance is started. Searches PATH, registry "
+                "App Paths, Start Menu .lnk files, and shell:AppsFolder."
             ),
             "parameters": {
                 "type": "object",
@@ -216,6 +251,13 @@ def dispatch_tool(backend: DesktopBackend, name: str, arguments: dict[str, Any])
             )
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "error": f"screenshot_region needs x,y,width,height: {exc}"}
+    if name == "list_windows":
+        return backend.list_windows()
+    if name == "focus_window":
+        return backend.focus_window(
+            title_contains=_opt_str(args.get("title_contains")),
+            process_contains=_opt_str(args.get("process_contains")),
+        )
     if name == "launch_app":
         app = _opt_str(args.get("name"))
         if not app:
