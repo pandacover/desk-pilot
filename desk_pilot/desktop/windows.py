@@ -53,7 +53,7 @@ def _escape_sendkeys(text: str) -> str:
     out: list[str] = []
     for ch in text:
         if ch == "{":
-            out.append("{{")
+            out.append("{{}")
         elif ch == "}":
             out.append("{}}")
         else:
@@ -138,6 +138,8 @@ class WindowsDesktop(DesktopBackend):
         inner = getattr(auto, "uiautomation", auto)
         inner.SetGlobalSearchTimeout(3)
         self._start_apps_cache: list[dict[str, str]] | None = None
+        self.highlight_overlay = True
+        self.highlight_duration = 0.4
 
     def _prepare(self) -> dict[str, Any] | None:
         from desk_pilot.desktop.com import bind_uia_to_this_thread
@@ -292,8 +294,9 @@ class WindowsDesktop(DesktopBackend):
             except Exception:
                 pass
             try:
-                control.Click()
                 rect = _rect_list(control.BoundingRectangle)
+                self.flash_highlight(rect)
+                control.Click()
                 return {
                     "ok": True,
                     "clicked": {
@@ -308,7 +311,8 @@ class WindowsDesktop(DesktopBackend):
                 if len(rect) == 4 and rect[2] > rect[0]:
                     cx = (rect[0] + rect[2]) // 2
                     cy = (rect[1] + rect[3]) // 2
-                    fallback = self._click_xy(cx, cy)
+                    self.flash_highlight(rect)
+                    fallback = self._click_xy(cx, cy, highlight=False)
                     fallback["note"] = f"UIA Click failed ({exc}); used coordinate fallback."
                     return fallback
                 return {"ok": False, "error": f"Click failed: {exc}"}
@@ -342,6 +346,7 @@ class WindowsDesktop(DesktopBackend):
                 control.SetFocus()
             except Exception:
                 pass
+            self.flash_highlight(_rect_list(getattr(control, "BoundingRectangle", None)))
             if clear:
                 try:
                     pattern = control.GetPattern(auto.PatternId.ValuePattern)
@@ -515,7 +520,7 @@ class WindowsDesktop(DesktopBackend):
             if start_file(candidate):
                 return {
                     "ok": True,
-                    "method": "app_paths",
+                    "method": "path",
                     "started": candidate,
                     "tried": tried,
                     "hint": "Wait for the window, then list_ui.",
@@ -800,7 +805,28 @@ class WindowsDesktop(DesktopBackend):
             return None
         return None
 
-    def _click_xy(self, x: int, y: int) -> dict[str, Any]:
+    def flash_highlight(self, rect: list[int] | tuple[int, ...] | None, duration: float | None = None) -> None:
+        if not self.highlight_overlay:
+            return
+        if not rect or len(rect) < 4:
+            return
+        try:
+            from desk_pilot.desktop.overlay import HIGHLIGHT_SECONDS, get_overlay
+            from desk_pilot.desktop.sketch import normalize_rect
+
+            left, top, right, bottom = normalize_rect(rect)
+            if (right - left) < 1 and (bottom - top) < 1:
+                return
+            wait = self.highlight_duration if duration is None else duration
+            if wait is None:
+                wait = HIGHLIGHT_SECONDS
+            get_overlay().flash(rect, duration=float(wait))
+        except Exception:
+            return
+
+    def _click_xy(self, x: int, y: int, *, highlight: bool = True) -> dict[str, Any]:
+        if highlight:
+            self.flash_highlight([int(x) - 12, int(y) - 12, int(x) + 12, int(y) + 12])
         try:
             self.auto.Click(x, y)
             return {"ok": True, "clicked": {"x": x, "y": y}, "method": "uiautomation.Click"}
