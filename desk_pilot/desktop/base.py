@@ -50,5 +50,17 @@ class DesktopBackend(ABC):
         """Wait until the foreground window title matches."""
 
     @abstractmethod
+    def list_windows(self) -> dict[str, Any]:
+        """Top-level windows (title/process), including unfocused ones."""
+
+    @abstractmethod
+    def focus_window(
+        self,
+        title_contains: str | None = None,
+        process_contains: str | None = None,
+    ) -> dict[str, Any]:
+        """Activate an already-open top-level window."""
+
+    @abstractmethod
     def launch_app(self, name: str) -> dict[str, Any]:
-        """Start an installed app by display name / executable (not Win+R PATH)."""
+        """Start an installed app, or focus it if it is already open."""

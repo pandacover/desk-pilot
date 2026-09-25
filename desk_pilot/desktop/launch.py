@@ -31,6 +31,24 @@ def score_name(query: str, candidate: str) -> int:
     return 0
 
 
+def window_match_score(query: str, *, title: str = "", process: str = "") -> int:
+    """Score how well an open window matches an app name (title or process stem)."""
+    best = max(score_name(query, title), score_name(query, process))
+    q = _norm(query)
+    t = _norm(title)
+    p = _norm(process)
+    if q and q in t:
+        best = max(best, 88)
+    if q and p and (q == p or q in p.split()):
+        best = max(best, 95)
+    return best
+
+
+def is_agent_window(title: str = "", process: str = "") -> bool:
+    blob = f"{title} {process}".lower()
+    return "desk pilot" in blob
+
+
 def best_named_match(query: str, names: Iterable[str], *, minimum: int = 55) -> str | None:
     ranked = sorted(((score_name(query, name), name) for name in names), reverse=True)
     if not ranked or ranked[0][0] < minimum:

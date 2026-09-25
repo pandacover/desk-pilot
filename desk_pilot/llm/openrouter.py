@@ -37,9 +37,11 @@ class OpenRouterClient:
     def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
         if not self.api_key:
             raise LLMError("No OpenRouter API key. Paste one in Settings or set OPENROUTER_API_KEY.")
+        from desk_pilot.agent.history import sanitize_messages
+
         body: dict[str, Any] = {
             "model": self.model,
-            "messages": messages,
+            "messages": sanitize_messages(messages),
             "tools": tools,
             "tool_choice": "auto",
             "temperature": 0.2,
