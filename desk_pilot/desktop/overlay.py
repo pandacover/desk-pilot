@@ -1,10 +1,15 @@
 """Reuse one click-through, topmost layered overlay for the sketch highlight.
 
-Thread rule: the overlay HWND is owned by one thread for its lifetime.
+Thread rule: one owner thread owns the overlay HWND for its lifetime.
 When a Tk pump is installed (Desk Pilot GUI), that is the UI main thread.
 CreateWindowEx, UpdateLayeredWindow, ShowWindow, and DestroyWindow run only
-on that thread via ``call_on_overlay_thread``. The agent worker must never
-blit a HWND created on the Test-sketch thread or the UI thread.
+on that thread via ``call_on_overlay_thread``. Test sketch, guide, hide, and
+close all go through that owner. Never blit from the agent worker, and never
+reuse a HWND created on another thread.
+
+If UpdateLayeredWindow (or SetWindowPos) returns ERROR_INVALID_WINDOW_HANDLE
+(1400), destroy/forget the handle on the owner thread, CreateWindowEx again,
+and blit once more. A failed blit never leaves a stale HWND on the singleton.
 
 If no pump is set (CLI / unit tests), the caller thread owns the window and
 must create and blit on that same thread.
@@ -19,8 +24,10 @@ from typing import Any, Callable, Sequence, TypeVar
 
 HIGHLIGHT_SECONDS = 0.4
 MARSHAL_TIMEOUT = 8.0
+ERROR_INVALID_WINDOW_HANDLE = 1400
 
 _singleton: HighlightOverlay | None = None
+_singleton_lock = threading.Lock()
 _pump: Callable[[Callable[[], None]], None] | None = None
 _owner_tid: int | None = None
 
@@ -50,6 +57,16 @@ def overlay_thread_note(*, hwnd: int = 0, hwnd_tid: int | None = None) -> str:
         f"tid={threading.get_ident()} owner={_owner_tid} "
         f"hwnd_tid={hwnd_tid} hwnd={hwnd}"
     )
+
+
+def is_invalid_hwnd_error(message: str | None, code: int | None = None) -> bool:
+    """True for Win32 ERROR_INVALID_WINDOW_HANDLE (1400)."""
+    if code == ERROR_INVALID_WINDOW_HANDLE:
+        return True
+    text = message or ""
+    if f"GetLastError={ERROR_INVALID_WINDOW_HANDLE}" in text:
+        return True
+    return "invalid window handle" in text.lower()
 
 
 def call_on_overlay_thread(fn: Callable[[], T], *, timeout: float = MARSHAL_TIMEOUT) -> T:
@@ -129,37 +146,99 @@ class HighlightOverlay:
             return {
                 "ok": False,
                 "skipped": False,
+                "recreated": False,
                 "error": f"{type(exc).__name__}: {exc} {overlay_thread_note(hwnd=self._hwnd, hwnd_tid=self._hwnd_tid)}",
                 "rect": box,
             }
 
     def _show_win32(self, box: list[int], image: Any, origin_x: int, origin_y: int) -> dict[str, Any]:
+        """Owner-thread paint. Recreates the HWND once after Win32 error 1400."""
         hwnd, err = self._ensure_window()
         note = overlay_thread_note(hwnd=hwnd, hwnd_tid=self._hwnd_tid)
         if not hwnd:
             return {
                 "ok": False,
                 "skipped": False,
+                "recreated": False,
                 "error": f"{err or 'CreateWindowExW failed'} {note}",
                 "rect": box,
             }
+        ok, blit_err = self._paint_once(hwnd, image, origin_x, origin_y)
+        if ok:
+            return {"ok": True, "skipped": False, "recreated": False, "error": None, "rect": box}
+
+        first_err = blit_err or "UpdateLayeredWindow failed"
+        self._destroy_and_forget()
+        if not is_invalid_hwnd_error(first_err):
+            note = overlay_thread_note(hwnd=0, hwnd_tid=None)
+            return {
+                "ok": False,
+                "skipped": False,
+                "recreated": False,
+                "error": f"{first_err} {note}",
+                "rect": box,
+            }
+
+        hwnd, err = self._ensure_window()
+        note = overlay_thread_note(hwnd=hwnd, hwnd_tid=self._hwnd_tid)
+        if not hwnd:
+            return {
+                "ok": False,
+                "skipped": False,
+                "recreated": False,
+                "error": f"{first_err} (hwnd recreate failed: {err}) {note}",
+                "rect": box,
+            }
+        ok, blit_err = self._paint_once(hwnd, image, origin_x, origin_y)
+        if ok:
+            return {"ok": True, "skipped": False, "recreated": True, "error": None, "rect": box}
+        still = blit_err or first_err
+        self._destroy_and_forget()
+        note = overlay_thread_note(hwnd=0, hwnd_tid=None)
+        return {
+            "ok": False,
+            "skipped": False,
+            "recreated": True,
+            "error": f"{still} (hwnd recreated, still failed) {note}",
+            "rect": box,
+        }
+
+    def _paint_once(self, hwnd: int, image: Any, origin_x: int, origin_y: int) -> tuple[bool, str | None]:
         try:
-            ok, blit_err = _blit(hwnd, image, origin_x, origin_y)
+            return self._paint_hwnd(hwnd, image, origin_x, origin_y)
         except Exception as exc:  # noqa: BLE001 — 64-bit handle convert errors must surface
-            return {
-                "ok": False,
-                "skipped": False,
-                "error": f"{type(exc).__name__}: {exc} {note}",
-                "rect": box,
-            }
-        if not ok:
-            return {
-                "ok": False,
-                "skipped": False,
-                "error": f"{blit_err or 'UpdateLayeredWindow failed'} {note}",
-                "rect": box,
-            }
-        return {"ok": True, "skipped": False, "error": None, "rect": box}
+            return False, f"{type(exc).__name__}: {exc}"
+
+    def _paint_hwnd(self, hwnd: int, image: Any, origin_x: int, origin_y: int) -> tuple[bool, str | None]:
+        return _blit(hwnd, image, origin_x, origin_y)
+
+    def _create_hwnd(self) -> tuple[int, str | None]:
+        if sys.platform != "win32":
+            return 0, "overlay only on Windows"
+        return _create_overlay_hwnd()
+
+    def _destroy_hwnd(self, hwnd: int) -> None:
+        if sys.platform != "win32" or not hwnd:
+            return
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        apply_overlay_argtypes(user32=user32)
+        user32.DestroyWindow(hwnd)
+
+    def _forget_hwnd(self) -> None:
+        self._hwnd = 0
+        self._hwnd_tid = None
+
+    def _destroy_and_forget(self) -> None:
+        hwnd = self._hwnd
+        self._forget_hwnd()
+        if not hwnd:
+            return
+        try:
+            self._destroy_hwnd(hwnd)
+        except Exception:
+            return
 
     def flash(self, rect: Sequence[float] | None, *, duration: float = HIGHLIGHT_SECONDS) -> dict[str, Any]:
         """Brief show+hide (unused by auto-act; kept for tests). Sleep stays on the caller thread."""
@@ -173,7 +252,7 @@ class HighlightOverlay:
         return result
 
     def hide(self) -> None:
-        if sys.platform != "win32" or not self._hwnd:
+        if sys.platform != "win32":
             return
         try:
             call_on_overlay_thread(self._hide_win32)
@@ -184,55 +263,63 @@ class HighlightOverlay:
         if not self._hwnd:
             return
         try:
-            import ctypes
-
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            apply_overlay_argtypes(user32=user32)
-            user32.ShowWindow(self._hwnd, 0)  # SW_HIDE
+            self._hide_hwnd(self._hwnd)
+            if not self._hwnd_is_alive(self._hwnd):
+                self._forget_hwnd()
         except Exception:
+            if not self._hwnd_is_alive(self._hwnd):
+                self._forget_hwnd()
+
+    def _hide_hwnd(self, hwnd: int) -> None:
+        if sys.platform != "win32" or not hwnd:
             return
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        apply_overlay_argtypes(user32=user32)
+        user32.ShowWindow(hwnd, 0)  # SW_HIDE
 
     def close(self) -> None:
-        if sys.platform != "win32" or not self._hwnd:
-            self._hwnd = 0
-            self._hwnd_tid = None
+        if sys.platform != "win32" and not self._hwnd:
+            self._forget_hwnd()
             return
         try:
             call_on_overlay_thread(self._close_win32)
         except Exception:
-            self._hwnd = 0
-            self._hwnd_tid = None
+            self._forget_hwnd()
 
     def _close_win32(self) -> None:
-        if not self._hwnd:
-            return
+        self._destroy_and_forget()
+
+    def _ensure_window(self) -> tuple[int, str | None]:
+        if self._hwnd_usable():
+            return self._hwnd, None
+        self._forget_hwnd()
+        try:
+            hwnd, err = self._create_hwnd()
+        except Exception as exc:  # noqa: BLE001 — Win32 class/window create must surface
+            self._forget_hwnd()
+            return 0, f"{type(exc).__name__}: {exc}"
+        if not hwnd:
+            self._forget_hwnd()
+            return 0, err
+        self._hwnd = hwnd
+        self._hwnd_tid = threading.get_ident()
+        return hwnd, None
+
+    def _hwnd_is_alive(self, hwnd: int) -> bool:
+        if not hwnd:
+            return False
+        if sys.platform != "win32":
+            return True
         try:
             import ctypes
 
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             apply_overlay_argtypes(user32=user32)
-            user32.DestroyWindow(self._hwnd)
+            return bool(user32.IsWindow(hwnd))
         except Exception:
-            pass
-        self._hwnd = 0
-        self._hwnd_tid = None
-
-    def _ensure_window(self) -> tuple[int, str | None]:
-        if sys.platform != "win32":
-            return 0, "overlay only on Windows"
-        if self._hwnd_usable():
-            return self._hwnd, None
-        self._hwnd = 0
-        self._hwnd_tid = None
-        try:
-            hwnd, err = _create_overlay_hwnd()
-        except Exception as exc:  # noqa: BLE001 — Win32 class/window create must surface
-            self._hwnd = 0
-            self._hwnd_tid = None
-            return 0, f"{type(exc).__name__}: {exc}"
-        self._hwnd = hwnd
-        self._hwnd_tid = threading.get_ident()
-        return hwnd, err
+            return False
 
     def _hwnd_usable(self) -> bool:
         """False if missing, created on another thread, or already destroyed (ERROR 1400)."""
@@ -240,37 +327,29 @@ class HighlightOverlay:
             return False
         if self._hwnd_tid is not None and self._hwnd_tid != threading.get_ident():
             # Do not DestroyWindow from the wrong thread; drop the stale handle.
-            self._hwnd = 0
-            self._hwnd_tid = None
+            self._forget_hwnd()
             return False
-        try:
-            import ctypes
-
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            apply_overlay_argtypes(user32=user32)
-            if not user32.IsWindow(self._hwnd):
-                self._hwnd = 0
-                self._hwnd_tid = None
-                return False
-        except Exception:
-            self._hwnd = 0
-            self._hwnd_tid = None
+        if not self._hwnd_is_alive(self._hwnd):
+            self._forget_hwnd()
             return False
         return True
 
 
 def get_overlay() -> HighlightOverlay:
     global _singleton
-    if _singleton is None:
-        _singleton = HighlightOverlay()
-    return _singleton
+    with _singleton_lock:
+        if _singleton is None:
+            _singleton = HighlightOverlay()
+        return _singleton
 
 
 def close_overlay() -> None:
     global _singleton
-    if _singleton is not None:
-        _singleton.close()
+    with _singleton_lock:
+        overlay = _singleton
         _singleton = None
+    if overlay is not None:
+        overlay.close()
 
 
 def overlay_api_argtypes(wintypes_mod: Any | None = None) -> dict[str, tuple[list[Any], Any]]:
@@ -414,10 +493,11 @@ def wndclassw_type(wintypes_mod: Any | None = None) -> type:
     return WNDCLASSW
 
 
-def _win_error(label: str) -> str:
+def _win_error(label: str, err: int | None = None) -> str:
     import ctypes
 
-    err = ctypes.get_last_error()
+    if err is None:
+        err = ctypes.get_last_error()
     detail = ""
     try:
         detail = (ctypes.FormatError(err) or "").strip()
@@ -612,15 +692,25 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
     pt_src = POINT(0, 0)
 
     hwnd_h = coerce_win_handle(wt.HWND, hwnd)
-    user32.SetWindowPos(
-        hwnd_h,
-        hwnd_topmost_handle(),
-        int(origin_x),
-        int(origin_y),
-        width,
-        height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER,
+    pos_ok = bool(
+        user32.SetWindowPos(
+            hwnd_h,
+            hwnd_topmost_handle(),
+            int(origin_x),
+            int(origin_y),
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER,
+        )
     )
+    if not pos_ok:
+        pos_err = ctypes.get_last_error()
+        if pos_err == ERROR_INVALID_WINDOW_HANDLE:
+            gdi32.SelectObject(hdc_mem, old)
+            gdi32.DeleteDC(hdc_mem)
+            gdi32.DeleteObject(hbm_h)
+            user32.ReleaseDC(None, hdc_screen)
+            return False, _win_error("SetWindowPos failed", pos_err)
     user32.UpdateLayeredWindow.argtypes = [
         wt.HWND,
         wt.HDC,
@@ -646,7 +736,8 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | N
             ULW_ALPHA,
         )
     )
-    blit_err = None if ok else _win_error("UpdateLayeredWindow failed")
+    last_err = 0 if ok else ctypes.get_last_error()
+    blit_err = None if ok else _win_error("UpdateLayeredWindow failed", last_err)
     gdi32.SelectObject(hdc_mem, old)
     gdi32.DeleteDC(hdc_mem)
     gdi32.DeleteObject(hbm_h)

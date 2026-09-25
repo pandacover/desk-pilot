@@ -281,6 +281,8 @@ class AgentLoop:
                 }
             if sketch.get("ok"):
                 extra = " window fallback" if payload.get("fallback") else ""
+                if sketch.get("recreated"):
+                    extra += " hwnd recreated"
                 self._log("sketch", f"{box}{extra}")
                 shown = True
             elif sketch.get("skipped"):
