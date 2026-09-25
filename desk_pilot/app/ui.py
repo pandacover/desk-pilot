@@ -7,9 +7,11 @@ import threading
 import tkinter as tk
 from tkinter import messagebox
 
+from typing import Any
+
 import customtkinter as ctk
 
-from desk_pilot import APP_NAME, DEFAULT_MAX_STEPS, DEFAULT_MODEL, __version__
+from desk_pilot import APP_NAME, DEFAULT_MAX_STEPS, DEFAULT_MODEL
 from desk_pilot.agent.loop import AgentLoop, RunResult
 from desk_pilot.agent.guide import is_guide_goal
 from desk_pilot.app.config import Settings, load_settings, save_settings
@@ -50,9 +52,11 @@ class DeskPilotApp(ctk.CTk):
         self._running = False
         self._guide_waiting = False
         self._testing_sketch = False
+        self._overlay_jobs: queue.Queue[Any] = queue.Queue()
 
         self._build()
         self._bind_keys()
+        self._install_overlay_pump()
         self.after(120, self._drain_logs)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_status()
@@ -457,7 +461,32 @@ class DeskPilotApp(ctk.CTk):
     def _log(self, kind: str, message: str) -> None:
         self._log_queue.put((kind, message))
 
+    def _install_overlay_pump(self) -> None:
+        """HWND owner is this Tk thread. Guide/Test sketch workers post paint jobs here."""
+        from desk_pilot.desktop.overlay import set_overlay_pump
+
+        set_overlay_pump(self._overlay_pump)
+
+    def _overlay_pump(self, fn: Any) -> None:
+        self._overlay_jobs.put(fn)
+        try:
+            self.after(0, self._flush_overlay_jobs)
+        except Exception:
+            pass
+
+    def _flush_overlay_jobs(self) -> None:
+        while True:
+            try:
+                job = self._overlay_jobs.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                job()
+            except Exception:
+                continue
+
     def _drain_logs(self) -> None:
+        self._flush_overlay_jobs()
         try:
             while True:
                 kind, message = self._log_queue.get_nowait()
@@ -494,9 +523,10 @@ class DeskPilotApp(ctk.CTk):
     def _on_close(self) -> None:
         self._stop.set()
         try:
-            from desk_pilot.desktop.overlay import close_overlay
+            from desk_pilot.desktop.overlay import close_overlay, set_overlay_pump
 
             close_overlay()
+            set_overlay_pump(None)
         except Exception:
             pass
         self.destroy()
