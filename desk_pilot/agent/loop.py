@@ -9,9 +9,12 @@ from typing import Any, Callable
 
 from desk_pilot.agent.guide import (
     ACTION_TOOLS,
+    FALLBACK_WINDOW_NOTE,
     expected_from_args,
+    guide_has_locator,
     instruction_for_tool,
     is_guide_goal,
+    resolve_guide_rect,
     snapshot_advanced,
 )
 from desk_pilot.agent.prompts import (
@@ -221,49 +224,96 @@ class AgentLoop:
         )
 
     def _run_guide_step(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+
         if name == "guide_step":
             payload = dispatch_tool(self.backend, "guide_step", args)
             if isinstance(payload, TerminalCall):
                 return {"ok": False, "error": "guide_step is not terminal."}
+            if payload.get("skip"):
+                self._log("sketch", f"skipped: {SKIP_NO_RECT}")
+                payload = dict(payload)
+                payload["awaited"] = "skipped"
+                payload["acted"] = False
+                return payload
         else:
-            x = args.get("x")
-            y = args.get("y")
-            rect = self.backend.find_control_rect(
-                automation_id=str(args["automation_id"]).strip() if args.get("automation_id") else None,
-                name=str(args["name"]).strip() if args.get("name") else None,
-                x=int(x) if x is not None and x != "" else None,
-                y=int(y) if y is not None and y != "" else None,
-            )
+            resolved = resolve_guide_rect(self.backend, args, tool_name=name)
+            instruction = instruction_for_tool(name, args)
+            if resolved.get("fallback") and resolved.get("rect"):
+                instruction = f"{instruction} {FALLBACK_WINDOW_NOTE}".strip()
             payload = {
                 "ok": True,
                 "guide": True,
-                "instruction": instruction_for_tool(name, args),
-                "rect": rect,
+                "instruction": instruction,
+                "rect": resolved.get("rect"),
+                "source": resolved.get("source"),
+                "fallback": bool(resolved.get("fallback")),
                 "intercepted": name,
                 "note": "Did not perform this action; waiting for you.",
+                "error": resolved.get("error"),
             }
+
         instruction = str(payload.get("instruction") or instruction_for_tool(name, args))
-        rect = payload.get("rect") if isinstance(payload.get("rect"), list) else None
+        box = as_rect(payload.get("rect"))
         expected = expected_from_args(name, args)
         if payload.get("expected_title") and not expected:
             expected = {"title_contains": str(payload["expected_title"])}
-        try:
-            self.backend.show_highlight(rect)
-        except Exception:
-            pass
+
+        attempted = False
+        shown = False
+        if box:
+            attempted = True
+            try:
+                sketch = self.backend.show_highlight(box)
+            except Exception as exc:  # noqa: BLE001 — overlay errors must reach the log
+                sketch = {
+                    "ok": False,
+                    "skipped": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "rect": box,
+                }
+            if not isinstance(sketch, dict):
+                sketch = {
+                    "ok": bool(sketch),
+                    "skipped": False,
+                    "error": None if sketch else "show_highlight returned no result",
+                    "rect": box,
+                }
+            if sketch.get("ok"):
+                extra = " window fallback" if payload.get("fallback") else ""
+                self._log("sketch", f"{box}{extra}")
+                shown = True
+            elif sketch.get("skipped"):
+                self._log("sketch", f"skipped: {sketch.get('error') or SKIP_NO_RECT}")
+            else:
+                self._log("sketch", f"failed: {sketch.get('error') or 'overlay error'}")
+        else:
+            self._log("sketch", f"skipped: {SKIP_NO_RECT}")
+            if name == "guide_step" and not guide_has_locator(args):
+                payload = dict(payload)
+                payload["instruction"] = instruction
+                payload["awaited"] = "skipped"
+                payload["acted"] = False
+                payload["rect"] = None
+                return payload
+            # Intercepted action with no rect: still wait so the user can Continue.
+
         if self.on_guide_step:
             self.on_guide_step(instruction)
         awaited = self._await_user(expected)
-        try:
-            self.backend.hide_highlight()
-        except Exception:
-            pass
+        if attempted:
+            try:
+                self.backend.hide_highlight()
+            except Exception as exc:  # noqa: BLE001
+                self._log("sketch", f"failed: hide {exc}")
         if self.on_guide_step:
             self.on_guide_step("")
         payload = dict(payload)
         payload["instruction"] = instruction
         payload["awaited"] = awaited
         payload["acted"] = False
+        payload["rect"] = box
+        payload["sketched"] = shown
         return payload
 
     def _await_user(self, expected: dict[str, str] | None) -> str:

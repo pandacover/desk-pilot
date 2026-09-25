@@ -78,6 +78,31 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertTrue(focused["ok"])
         self.assertIn("Notepad", self.desk.window_title)
 
+    def test_guide_step_instruction_only_is_rejected(self) -> None:
+        result = dispatch_tool(self.desk, "guide_step", {"instruction": "Click Start"})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("skip"))
+        self.assertIsNone(result.get("rect"))
+
+    def test_guide_step_name_resolves_rect(self) -> None:
+        result = dispatch_tool(
+            self.desk, "guide_step", {"instruction": "Click Start", "name": "Start"}
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("rect"), [0, 1040, 48, 1080])
+        self.assertFalse(result.get("fallback"))
+
+    def test_guide_step_unknown_name_falls_back_to_window(self) -> None:
+        result = dispatch_tool(
+            self.desk,
+            "guide_step",
+            {"instruction": "Click it", "name": "NoSuchControl"},
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("rect"), [0, 0, 1920, 1080])
+        self.assertTrue(result.get("fallback"))
+        self.assertIn("whole window", result.get("instruction") or "")
+
 
 if __name__ == "__main__":
     unittest.main()
