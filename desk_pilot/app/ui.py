@@ -286,20 +286,23 @@ class DeskPilotApp(ctk.CTk):
         self._worker.start()
 
     def _worker_run(self, goal: str, key: str) -> None:
+        from desk_pilot.desktop.com import com_thread
+
         client = OpenRouterClient(
             key,
             self.settings.model or DEFAULT_MODEL,
             reasoning_effort=self.settings.reasoning_effort or "low",
         )
         try:
-            agent = AgentLoop(
-                backend=self.backend,
-                llm=client,
-                max_steps=self.settings.max_steps,
-                on_log=lambda kind, msg: self._log_queue.put((kind, msg)),
-                stop_event=self._stop,
-            )
-            result = agent.run(goal)
+            with com_thread():
+                agent = AgentLoop(
+                    backend=self.backend,
+                    llm=client,
+                    max_steps=self.settings.max_steps,
+                    on_log=lambda kind, msg: self._log_queue.put((kind, msg)),
+                    stop_event=self._stop,
+                )
+                result = agent.run(goal)
         except Exception as exc:  # noqa: BLE001
             result = RunResult("fail", f"Agent crashed: {exc}", 0, self.backend.dry_run)
             self._log_queue.put(("error", result.message))
