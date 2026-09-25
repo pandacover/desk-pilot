@@ -1,0 +1,10 @@
+customtkinter==5.2.2
+httpx==0.28.1
+mss==10.2.0
+pillow==11.3.0
+
+# Windows-only: UI Automation plus pynput mouse/keyboard fallback.
+# Linux/macOS dry-run does not install these (pynput pulls evdev and needs Python headers).
+uiautomation==2.0.29; sys_platform == "win32"
+comtypes==1.4.11; sys_platform == "win32"
+pynput==1.8.1; sys_platform == "win32"
