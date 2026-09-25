@@ -333,6 +333,171 @@ def _raise_value_error() -> None:
     raise ValueError("overlay boom")
 
 
+_ERR_1400 = "UpdateLayeredWindow failed (GetLastError=1400 Invalid window handle.)"
+_ERR_87 = "UpdateLayeredWindow failed (GetLastError=87 Invalid parameter.)"
+
+
+class _StubOverlay(HighlightOverlay):
+    """Win32-free overlay: create/blit/hide/destroy are recorded fakes."""
+
+    def __init__(self, blit_script: list[tuple[bool, str | None]] | None = None) -> None:
+        super().__init__()
+        self.creates: list[int] = []
+        self.destroys: list[int] = []
+        self.paints: list[int] = []
+        self.hides: list[int] = []
+        self._blit_script = list(blit_script or [])
+        self._next = 400
+
+    def _create_hwnd(self) -> tuple[int, str | None]:
+        self._next += 1
+        self.creates.append(self._next)
+        return self._next, None
+
+    def _destroy_hwnd(self, hwnd: int) -> None:
+        self.destroys.append(hwnd)
+
+    def _hide_hwnd(self, hwnd: int) -> None:
+        self.hides.append(hwnd)
+
+    def _hwnd_is_alive(self, hwnd: int) -> bool:
+        return bool(hwnd) and hwnd not in self.destroys
+
+    def _paint_hwnd(self, hwnd: int, image: Any, origin_x: int, origin_y: int) -> tuple[bool, str | None]:
+        self.paints.append(hwnd)
+        if self._blit_script:
+            return self._blit_script.pop(0)
+        return True, None
+
+
+def _dummy_sketch_image() -> Any:
+    from PIL import Image
+
+    return Image.new("RGBA", (16, 16), (255, 220, 0, 200))
+
+
+def _drain_overlay_jobs(jobs: Any, thread: threading.Thread, timeout: float = 3.0) -> None:
+    import queue as queue_mod
+
+    deadline = time.time() + timeout
+    while thread.is_alive() and time.time() < deadline:
+        try:
+            jobs.get(timeout=0.05)()
+        except queue_mod.Empty:
+            continue
+    thread.join(timeout=1)
+
+
+class OverlayHardenTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        from desk_pilot.desktop.overlay import close_overlay, set_overlay_pump
+
+        set_overlay_pump(None)
+        close_overlay()
+
+    def test_invalid_hwnd_error_detects_1400(self) -> None:
+        from desk_pilot.desktop.overlay import ERROR_INVALID_WINDOW_HANDLE, is_invalid_hwnd_error
+
+        self.assertEqual(ERROR_INVALID_WINDOW_HANDLE, 1400)
+        self.assertTrue(is_invalid_hwnd_error(_ERR_1400))
+        self.assertTrue(is_invalid_hwnd_error("x", code=1400))
+        self.assertFalse(is_invalid_hwnd_error(_ERR_87))
+        self.assertFalse(is_invalid_hwnd_error(None))
+
+    def test_1400_recreates_hwnd_and_retries(self) -> None:
+        overlay = _StubOverlay([(False, _ERR_1400), (True, None)])
+        result = overlay._show_win32([120, 80, 520, 280], _dummy_sketch_image(), 120, 80)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["recreated"])
+        self.assertEqual(overlay.creates, [401, 402])
+        self.assertEqual(overlay.paints, [401, 402])
+        self.assertEqual(overlay.destroys, [401])
+        self.assertEqual(overlay._hwnd, 402)
+
+    def test_1400_recreate_still_failing_clears_hwnd(self) -> None:
+        overlay = _StubOverlay([(False, _ERR_1400), (False, _ERR_1400)])
+        result = overlay._show_win32([120, 80, 520, 280], _dummy_sketch_image(), 120, 80)
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["recreated"])
+        self.assertIn("hwnd recreated, still failed", result["error"] or "")
+        self.assertIn("GetLastError=1400", result["error"] or "")
+        self.assertEqual(overlay._hwnd, 0)
+        self.assertIsNone(overlay._hwnd_tid)
+        self.assertEqual(overlay.destroys, [401, 402])
+
+    def test_non_1400_fail_does_not_retry_and_drops_hwnd(self) -> None:
+        overlay = _StubOverlay([(False, _ERR_87)])
+        result = overlay._show_win32([120, 80, 520, 280], _dummy_sketch_image(), 120, 80)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["recreated"])
+        self.assertIn("GetLastError=87", result["error"] or "")
+        self.assertNotIn("hwnd recreated", result["error"] or "")
+        self.assertEqual(len(overlay.creates), 1)
+        self.assertEqual(len(overlay.paints), 1)
+        self.assertEqual(overlay._hwnd, 0)
+        self.assertEqual(overlay.destroys, [401])
+
+    def test_worker_show_hide_stress_via_marshal(self) -> None:
+        """N consecutive show/hide from a fake guide worker; no 1400, hwnd reused."""
+        import queue as queue_mod
+
+        from desk_pilot.desktop.overlay import call_on_overlay_thread, set_overlay_pump
+
+        jobs: queue_mod.Queue[Any] = queue_mod.Queue()
+        set_overlay_pump(jobs.put)
+        overlay = _StubOverlay()
+        image = _dummy_sketch_image()
+        box = [120, 80, 520, 280]
+        rounds = 25
+        results: list[dict[str, Any]] = []
+
+        def worker() -> None:
+            for _ in range(rounds):
+                results.append(
+                    call_on_overlay_thread(lambda: overlay._show_win32(box, image, 120, 80))
+                )
+                call_on_overlay_thread(overlay._hide_win32)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        _drain_overlay_jobs(jobs, thread)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(results), rounds)
+        self.assertTrue(all(item.get("ok") for item in results))
+        self.assertFalse(any(item.get("recreated") for item in results))
+        self.assertFalse(any("1400" in str(item.get("error") or "") for item in results))
+        self.assertEqual(overlay.creates, [401], "HWND must be reused across show/hide")
+        self.assertEqual(len(overlay.paints), rounds)
+        self.assertEqual(len(overlay.hides), rounds)
+        self.assertEqual(overlay.destroys, [])
+        self.assertEqual(overlay._hwnd, 401)
+
+    def test_worker_1400_retry_via_marshal_succeeds(self) -> None:
+        import queue as queue_mod
+
+        from desk_pilot.desktop.overlay import call_on_overlay_thread, set_overlay_pump
+
+        jobs: queue_mod.Queue[Any] = queue_mod.Queue()
+        set_overlay_pump(jobs.put)
+        overlay = _StubOverlay([(False, _ERR_1400), (True, None)])
+        seen: dict[str, Any] = {}
+
+        def worker() -> None:
+            seen["result"] = call_on_overlay_thread(
+                lambda: overlay._show_win32([10, 10, 80, 40], _dummy_sketch_image(), 10, 10)
+            )
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        _drain_overlay_jobs(jobs, thread)
+        self.assertFalse(thread.is_alive())
+        result = seen["result"]
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["recreated"])
+        self.assertEqual(overlay.creates, [401, 402])
+        self.assertEqual(overlay._hwnd, 402)
+
+
 class GuideIntentTests(unittest.TestCase):
     def test_keywords(self) -> None:
         self.assertTrue(is_guide_goal("how to open Helium and search for a dank meme"))
@@ -500,6 +665,39 @@ class GuideLoopTests(unittest.TestCase):
         self.assertEqual(desk.highlights, [])
         self.assertTrue(any(k == "sketch" and m.startswith("failed:") for k, m in logs))
         self.assertTrue(any("GetLastError=87" in m for _, m in logs))
+
+    def test_recreated_hwnd_is_logged(self) -> None:
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call("guide_step", '{"instruction":"Click Start","name":"Start"}', "1")
+                    ],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        original = desk.show_highlight
+
+        def wrapped(rect: Any) -> dict[str, Any]:
+            result = dict(original(rect))
+            result["recreated"] = True
+            return result
+
+        desk.show_highlight = wrapped  # type: ignore[method-assign]
+        AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=6,
+            force_guide=True,
+            await_step=lambda: "continue",
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("how to click Start")
+        self.assertTrue(any(k == "sketch" and "hwnd recreated" in m for k, m in logs))
+        self.assertTrue(any("[0, 1040, 48, 1080]" in m for k, m in logs if k == "sketch"))
 
     def test_guide_name_resolves_rect(self) -> None:
         logs: list[tuple[str, str]] = []

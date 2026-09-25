@@ -405,6 +405,8 @@ class DeskPilotApp(ctk.CTk):
             }
         if result.get("ok"):
             extra = " dry-run (no Win32 overlay)" if result.get("dry_run") else ""
+            if result.get("recreated"):
+                extra += " hwnd recreated"
             self._log_queue.put(("sketch", f"{result.get('rect') or box} test{extra}"))
         elif result.get("skipped"):
             self._log_queue.put(("sketch", f"skipped: {result.get('error') or SKIP_NO_RECT}"))
