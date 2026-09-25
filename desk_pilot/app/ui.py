@@ -40,6 +40,7 @@ class DeskPilotApp(ctk.CTk):
         self.settings = load_settings()
         self.force_mock = force_mock
         self.backend = get_backend(force_mock=force_mock or not is_windows())
+        self.backend.highlight_overlay = self.settings.highlight_overlay
         self._log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
@@ -178,8 +179,15 @@ class DeskPilotApp(ctk.CTk):
             variable=self.confirm_var,
         ).grid(row=8, column=0, sticky="w", padx=14, pady=(8, 0))
 
+        self.overlay_var = tk.BooleanVar(value=self.settings.highlight_overlay)
+        ctk.CTkCheckBox(
+            settings,
+            text="Sketch overlay on click/type",
+            variable=self.overlay_var,
+        ).grid(row=9, column=0, sticky="w", padx=14, pady=(6, 0))
+
         ctk.CTkButton(settings, text="Save settings", command=self._save_settings).grid(
-            row=9, column=0, sticky="ew", padx=14, pady=(12, 14)
+            row=10, column=0, sticky="ew", padx=14, pady=(12, 14)
         )
 
         log_frame = ctk.CTkFrame(self)
@@ -232,11 +240,13 @@ class DeskPilotApp(ctk.CTk):
             max_steps=steps,
             reasoning_effort=self.settings.reasoning_effort or "low",
             confirm_before_run=bool(self.confirm_var.get()),
+            highlight_overlay=bool(self.overlay_var.get()),
         )
 
     def _save_settings(self) -> None:
         self.settings = self._read_form()
         path = save_settings(self.settings)
+        self.backend.highlight_overlay = self.settings.highlight_overlay
         self._log("info", f"Saved settings to {path}")
         self._refresh_status()
 
@@ -276,6 +286,7 @@ class DeskPilotApp(ctk.CTk):
                 self._log("info", "Run cancelled.")
                 return
         save_settings(self.settings)
+        self.backend.highlight_overlay = self.settings.highlight_overlay
         self._stop.clear()
         self._running = True
         self.run_btn.configure(state="disabled")
@@ -360,6 +371,12 @@ class DeskPilotApp(ctk.CTk):
 
     def _on_close(self) -> None:
         self._stop.set()
+        try:
+            from desk_pilot.desktop.overlay import close_overlay
+
+            close_overlay()
+        except Exception:
+            pass
         self.destroy()
 
 
