@@ -95,11 +95,13 @@ RETRY_NEED_TARGET = (
 
 
 def guide_has_locator(args: dict[str, Any] | None) -> bool:
-    """True when the model passed a control id, visible name, or x,y."""
+    """True when the model passed a control id, visible name, title, or x,y."""
     args = args or {}
     if str(args.get("automation_id") or "").strip():
         return True
     if str(args.get("name") or "").strip():
+        return True
+    if str(args.get("expected_title") or args.get("title_contains") or args.get("process_contains") or "").strip():
         return True
     x, y = args.get("x"), args.get("y")
     return x is not None and x != "" and y is not None and y != ""
@@ -115,8 +117,8 @@ def _opt_int(value: Any) -> int | None:
 
 
 def resolve_guide_rect(backend: Any, args: dict[str, Any] | None, *, tool_name: str = "guide_step") -> dict[str, Any]:
-    """Locate a sketch rect: control / xy, then named window, then focused window."""
-    from desk_pilot.desktop.rects import as_rect
+    """Locate a sketch rect: control / usable xy, then named window, then focused window."""
+    from desk_pilot.desktop.rects import sketchable_rect, usable_screen_point
 
     args = args or {}
     aid = str(args.get("automation_id") or "").strip() or None
@@ -125,38 +127,39 @@ def resolve_guide_rect(backend: Any, args: dict[str, Any] | None, *, tool_name: 
         nam = None
     x = _opt_int(args.get("x"))
     y = _opt_int(args.get("y"))
-    title = (
-        str(
-            args.get("expected_title")
-            or args.get("title_contains")
-            or args.get("process_contains")
-            or ""
-        ).strip()
-        or None
-    )
-    if tool_name == "launch_app":
-        title = title or str(args.get("name") or "").strip() or None
-    if tool_name == "focus_window":
-        title = title or str(args.get("title_contains") or args.get("process_contains") or "").strip() or None
+    if not usable_screen_point(x, y):
+        x, y = None, None
+
+    titles: list[str] = []
+    for bit in (
+        args.get("expected_title"),
+        args.get("title_contains"),
+        args.get("process_contains"),
+        nam if tool_name in {"guide_step", "focus_window", "wait_for_window"} else None,
+        args.get("name") if tool_name == "launch_app" else None,
+    ):
+        text = str(bit or "").strip()
+        if text and text not in titles:
+            titles.append(text)
 
     has_control_query = bool(aid or nam or (x is not None and y is not None))
     box = None
     if has_control_query:
-        box = as_rect(backend.find_control_rect(automation_id=aid, name=nam, x=x, y=y))
+        box = sketchable_rect(backend.find_control_rect(automation_id=aid, name=nam, x=x, y=y))
     if box:
         source = "xy" if (x is not None and y is not None and not aid and not nam) else "control"
         return {"rect": box, "source": source, "fallback": False}
 
-    if title:
+    for title in titles:
         try:
-            titled = as_rect(backend.window_rect_by_title(title))
+            titled = sketchable_rect(backend.window_rect_by_title(title))
         except Exception:
             titled = None
         if titled:
             return {"rect": titled, "source": "window", "fallback": True, "title": title}
 
     try:
-        focused = as_rect(backend.focused_window_rect())
+        focused = sketchable_rect(backend.focused_window_rect())
     except Exception:
         focused = None
     if focused:

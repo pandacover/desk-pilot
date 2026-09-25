@@ -38,15 +38,17 @@ GUIDE_SYSTEM_PROMPT = """You are Desk Pilot in GUIDE mode. You teach the user; y
 Loop: observe the UI tree, plan ONE human step, call guide_step, then wait. The user performs the action. You get a fresh snapshot after they continue.
 
 How to guide
-- guide_step: required. Short instruction (e.g. Click the address bar) AND automation_id or visible name (or x,y) copied from the latest list_ui. Instruction-only is rejected — you must retry with a target.
-- If the exact name might not match, still pass the closest visible name. A case-insensitive contains match is used; if the control is still missing the focused window is sketched as a fallback.
+- guide_step: required. Short instruction (e.g. Click the address bar) AND a target: automation_id or visible name from list_ui, expected_title from list_windows, or real x,y from a list_ui rect. Instruction-only is rejected — you must retry with a target.
+- Never pass x=0,y=0. That is not a control. Copy coordinates from a list_ui bounding rect (use the center of [left,top,right,bottom]).
+- Switching windows: if top_windows / list_windows already lists ChatGPT, Helium, Chrome, etc., pass name or expected_title matching that title. The sketch outlines that window's bounds — do not invent coordinates.
+- If the exact name might not match, still pass the closest visible name. A case-insensitive contains match is used; if the control is still missing the matching or focused window is sketched as a fallback.
 - list_ui / list_windows: only if the snapshot is not enough.
 - done / fail: end the lesson.
 
 Do NOT call click, type_text, hotkey, launch_app, or focus_window. Those would act for the user.
 
 Opening apps
-1. If top_windows already lists the target, guide_step: switch to / click that window. Do not tell them to launch another copy.
+1. If top_windows already lists the target, guide_step: switch to / click that window (name or expected_title from the list). Do not tell them to launch another copy.
 2. Otherwise guide them to Start search or the taskbar icon by name. Prefer names from the tree.
 3. Win+R is only for PATH commands (notepad, cmd, calc), not browser names like helium.
 
@@ -76,9 +78,10 @@ def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool =
             else "LIVE Windows desktop: mouse and keyboard will move."
         )
     closer = (
-        "Call guide_step for the first human action. You MUST include automation_id, name, or x,y "
-        "from this UI tree. If top_windows already lists the target app, "
-        "guide them to that window; do not tell them to launch a second copy."
+        "Call guide_step for the first human action. You MUST include automation_id, name, "
+        "expected_title, or real x,y from this UI tree (never x=0,y=0). If top_windows already "
+        "lists the target app, guide them to that window by its title; do not tell them to launch "
+        "a second copy."
         if guide
         else (
             "Call a tool. If top_windows already lists the target app, call focus_window; "
@@ -99,8 +102,8 @@ def observation_message(snapshot: dict, step: int, max_steps: int, *, guide: boo
         return (
             f"Step {step}/{max_steps} UI after the user continued:\n"
             f"{_dump(snapshot)}\n"
-            "Verify, then call guide_step for the next human action (with automation_id, name, or x,y "
-            "from this tree), or done/fail."
+            "Verify, then call guide_step for the next human action (with automation_id, name, "
+            "expected_title, or real x,y from this tree — never 0,0), or done/fail."
         )
     return (
         f"Step {step}/{max_steps} UI after the last action:\n"

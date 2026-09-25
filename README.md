@@ -98,6 +98,18 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 observe → plan one human step → sketch → you act → Continue → next step → done
 ```
 
+## Pull latest (0.1.7)
+
+Fixes two live sketch failures after 0.1.6: a useless `SKETCH [-12, -12, 12, 12]` corner box (the (0,0) ±12 fallback), and `SKETCH failed: ArgumentError: argument 2: OverflowError: int too long to convert` on 64-bit Windows (HWND/HDC/HBITMAP stuffed into 32-bit ctypes args). Overlay blit now uses pointer-sized handles. How-to steps that switch to an already-open ChatGPT/Helium/Chrome window sketch that window's rect.
+
+```powershell
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Then **Test sketch**, then retry a how-to goal. You should see `SKETCH` with real desktop coordinates (for example a window `[96, 48, 1340, 880]`), not `[-12, -12, 12, 12]` and not OverflowError.
+
 ## Pull latest (0.1.6)
 
 Fixes `SKETCH failed: AttributeError: module 'ctypes.wintypes' has no attribute 'HCURSOR'` on some Windows Python builds. Overlay create no longer depends on those missing HANDLE aliases.
