@@ -183,10 +183,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "guide_step",
             "description": (
-                "Guide mode only: highlight one control and tell the human what to do. "
-                "You MUST pass automation_id or visible name (or x and y) copied from the "
-                "latest list_ui. Instruction-only calls are rejected and must be retried. "
-                "Do not click or type. One step per turn."
+                "Guide mode only: highlight one control or window and tell the human what to do. "
+                "You MUST pass automation_id or visible name from list_ui, expected_title from "
+                "list_windows / top_windows, or real x and y from a list_ui rect. Never pass "
+                "x=0,y=0. To switch to an already-open Chrome/Helium/ChatGPT window, pass name or "
+                "expected_title matching that window — the sketch uses its bounds. "
+                "Instruction-only calls are rejected and must be retried. Do not click or type. "
+                "One step per turn."
             ),
             "parameters": {
                 "type": "object",
@@ -206,11 +209,20 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                             "if the exact name is missing."
                         ),
                     },
-                    "x": {"type": "integer", "description": "Screen X when no control id/name."},
-                    "y": {"type": "integer", "description": "Screen Y when no control id/name."},
+                    "x": {
+                        "type": "integer",
+                        "description": "Screen X when no control id/name. Must be a real list_ui coordinate, never 0.",
+                    },
+                    "y": {
+                        "type": "integer",
+                        "description": "Screen Y when no control id/name. Must be a real list_ui coordinate, never 0.",
+                    },
                     "expected_title": {
                         "type": "string",
-                        "description": "If the window title will contain this after the user acts, auto-advance may fire.",
+                        "description": (
+                            "Window title from list_windows / top_windows (e.g. ChatGPT, Helium). "
+                            "Use this to sketch that window. Also used to auto-advance after the user acts."
+                        ),
                     },
                 },
                 "required": ["instruction"],

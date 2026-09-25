@@ -224,7 +224,7 @@ class AgentLoop:
         )
 
     def _run_guide_step(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, rect_skip_reason, sketchable_rect
 
         if name == "guide_step":
             payload = dispatch_tool(self.backend, "guide_step", args)
@@ -254,7 +254,7 @@ class AgentLoop:
             }
 
         instruction = str(payload.get("instruction") or instruction_for_tool(name, args))
-        box = as_rect(payload.get("rect"))
+        box = sketchable_rect(payload.get("rect"))
         expected = expected_from_args(name, args)
         if payload.get("expected_title") and not expected:
             expected = {"title_contains": str(payload["expected_title"])}
@@ -288,7 +288,7 @@ class AgentLoop:
             else:
                 self._log("sketch", f"failed: {sketch.get('error') or 'overlay error'}")
         else:
-            self._log("sketch", f"skipped: {SKIP_NO_RECT}")
+            self._log("sketch", f"skipped: {rect_skip_reason(payload.get('rect')) or payload.get('error') or SKIP_NO_RECT}")
             if name == "guide_step" and not guide_has_locator(args):
                 payload = dict(payload)
                 payload["instruction"] = instruction
