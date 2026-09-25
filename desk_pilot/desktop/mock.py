@@ -46,6 +46,25 @@ class MockDesktop(DesktopBackend):
         self.drags: list[dict[str, Any]] = []
         self.clipboard_image: str | None = None
         self.steal_focus_after_action = False
+        self.address_value = ""
+        self.stale_nav = False
+        self.files_catalog: list[dict[str, Any]] = [
+            {
+                "path": r"C:\Program Files (x86)\Steam\steamapps\common\Brawlhalla\Brawlhalla.exe",
+                "size": 18432000,
+                "mtime": "2024-06-01T12:00:00Z",
+            },
+            {
+                "path": r"C:\Users\mock\Desktop\Brawlhalla.lnk",
+                "size": 2048,
+                "mtime": "2024-06-01T12:00:00Z",
+            },
+            {
+                "path": r"C:\Users\mock\Downloads\readme.txt",
+                "size": 120,
+                "mtime": "2024-06-02T12:00:00Z",
+            },
+        ]
 
     def reset(self) -> None:
         self.__init__()
@@ -149,12 +168,19 @@ class MockDesktop(DesktopBackend):
             self.run_text = "" if clear else self.run_text
             self.run_text += text
             target = "Run.Open"
+            value = self.run_text
+        elif self.scene == "tldraw":
+            self.address_value = "" if clear else self.address_value
+            self.address_value += text
+            target = "Address"
+            value = self.address_value
+            if "tldraw" in text.lower():
+                self._open_tldraw()
         else:
             self.edit_text = "" if clear else self.edit_text
             self.edit_text += text
             target = "Notepad.Edit" if self.scene == "notepad" else "focused"
-        if self.scene == "tldraw" and "tldraw" in text.lower():
-            self._open_tldraw()
+            value = self.edit_text
         return self._maybe_steal_focus(
             {
                 "ok": True,
@@ -162,7 +188,7 @@ class MockDesktop(DesktopBackend):
                 "typed": text,
                 "clear": clear,
                 "target": target,
-                "value": self.run_text if self.scene == "run" else self.edit_text,
+                "value": value,
             }
         )
 
@@ -179,6 +205,15 @@ class MockDesktop(DesktopBackend):
             self.edit_text = ""
             self.window_title = "Start"
             return {"ok": True, "dry_run": True, "keys": chord, "window": "Start"}
+        if chord in {"ctrl+l"}:
+            if self.scene == "tldraw":
+                return {
+                    "ok": True,
+                    "dry_run": True,
+                    "keys": chord,
+                    "window": self.window_title,
+                    "note": "Address bar focused",
+                }
         if chord in {"enter", "return"}:
             if self.scene == "run_error":
                 self.scene = "desktop"
@@ -205,6 +240,11 @@ class MockDesktop(DesktopBackend):
             if self.scene == "start" and "notepad" in self.edit_text.lower():
                 self._open_notepad()
                 return {"ok": True, "dry_run": True, "keys": chord, "window": "Untitled - Notepad"}
+            if self.scene == "tldraw":
+                self._apply_browser_navigation(self.address_value)
+                return self._maybe_steal_focus(
+                    {"ok": True, "dry_run": True, "keys": chord, "window": self.window_title}
+                )
         if chord in {"alt+f4", "alt+f4"}:
             self._close_current_app()
             self.scene = "desktop"
@@ -352,6 +392,52 @@ class MockDesktop(DesktopBackend):
         self._focus_app(existing)
         return {"ok": True, "dry_run": True, "window": self.window_title, "method": "focus"}
 
+    def find_files(
+        self,
+        name: str | None = None,
+        glob: str | None = None,
+        max_results: int = 20,
+    ) -> dict[str, Any]:
+        from fnmatch import fnmatch
+        from pathlib import Path
+
+        query = (name or "").strip() or None
+        pattern = (glob or "").strip() or None
+        if query and any(ch in query for ch in "*?["):
+            pattern = query
+            query = None
+        if not query and not pattern:
+            return {
+                "ok": False,
+                "dry_run": True,
+                "error": "find_files needs name or glob (e.g. brawlhalla.exe or *.exe).",
+                "results": [],
+            }
+        try:
+            limit = max(1, min(int(max_results), 50))
+        except (TypeError, ValueError):
+            limit = 20
+        hits: list[dict[str, Any]] = []
+        for item in self.files_catalog:
+            path = str(item.get("path") or "")
+            base = Path(path.replace("\\", "/")).name
+            if query and query.lower() not in base.lower() and query.lower() not in path.lower():
+                continue
+            if pattern and not (fnmatch(base, pattern) or fnmatch(path, pattern)):
+                continue
+            hits.append(dict(item))
+            if len(hits) >= limit:
+                break
+        return {
+            "ok": True,
+            "dry_run": True,
+            "results": hits,
+            "count": len(hits),
+            "name": query,
+            "glob": pattern,
+            "hint": "Use these full paths. Do not Win+S the filename into web search.",
+        }
+
     def find_control_rect(
         self,
         automation_id: str | None = None,
@@ -471,6 +557,28 @@ class MockDesktop(DesktopBackend):
         label = "tldraw" if "tldraw" in (title or "").lower() else (title or "tldraw")
         self.scene = "tldraw"
         self.window_title = f"{label} - Helium"
+        self.address_value = getattr(self, "address_value", "") or "https://www.tldraw.com"
+        self._upsert_app("helium", self.window_title, "tldraw", rect=[80, 40, 1280, 800])
+
+    def _apply_browser_navigation(self, typed: str) -> None:
+        url = (typed or "").strip()
+        if not url or self.stale_nav:
+            return
+        lower = url.lower()
+        if "tldraw" in lower:
+            self._open_tldraw()
+            return
+        host = url
+        for prefix in ("https://", "http://"):
+            if host.lower().startswith(prefix):
+                host = host[len(prefix) :]
+                break
+        host = host.split("/")[0] or host
+        if host.startswith("www."):
+            host = host[4:]
+        label = host or url
+        self.window_title = f"{label} - Helium"
+        self.address_value = url
         self._upsert_app("helium", self.window_title, "tldraw", rect=[80, 40, 1280, 800])
 
     def _upsert_app(
@@ -598,6 +706,7 @@ class MockDesktop(DesktopBackend):
                 rect=[140, 48, 720, 76],
                 path=f"{title}/Toolbar/Address",
             )
+            focused = {**focused, "value": self.address_value}
             # Chrome chrome only — the tldraw canvas is not in UIA (live ~10 controls).
             controls = [
                 _ctrl(name=title, ctype="Window", aid="Browser", rect=[80, 40, 1280, 800], path=title),

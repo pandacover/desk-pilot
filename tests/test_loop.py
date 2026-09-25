@@ -161,6 +161,128 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(second[0]["role"], "system")
         self.assertTrue(all(m.get("role") != "tool" for m in second))
 
+    def test_find_files_scripted_goal(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [_call("find_files", '{"name":"brawlhalla.exe"}', "1")],
+                },
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call(
+                            "done",
+                            '{"result":"C:\\\\Program Files (x86)\\\\Steam\\\\steamapps\\\\common\\\\Brawlhalla\\\\Brawlhalla.exe"}',
+                            "2",
+                        )
+                    ],
+                },
+            ]
+        )
+        desk = MockDesktop()
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=6,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("find brawlhalla.exe on my computer")
+        self.assertEqual(result.status, "done")
+        self.assertIn("brawlhalla.exe", result.message.lower())
+        self.assertFalse(any("win+s" in m.lower() for _, m in logs))
+        self.assertTrue(any("find_files" in m for k, m in logs if k == "act"))
+
+    def test_stale_browser_nav_is_not_success(self) -> None:
+        class RecordingLLM(ScriptedLLM):
+            def __init__(self, script):
+                super().__init__(script)
+                self.payloads: list[list[dict[str, Any]]] = []
+
+            def complete(self, messages, tools):
+                self.payloads.append(messages)
+                return super().complete(messages, tools)
+
+        llm = RecordingLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call("type_text", '{"text":"https://www.google.com/imghp"}', "1"),
+                        _call("hotkey", '{"keys":"enter"}', "2"),
+                    ],
+                },
+                {
+                    "content": "",
+                    "tool_calls": [_call("fail", '{"reason":"navigation did not change the title"}', "3")],
+                },
+            ]
+        )
+        desk = MockDesktop()
+        desk._open_tldraw()
+        desk.window_title = "brawlhalla.exe - Helium"
+        desk.stale_nav = True
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=8,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("open google images")
+        self.assertEqual(result.status, "fail")
+        self.assertEqual(desk.window_title, "brawlhalla.exe - Helium")
+        self.assertTrue(any("NAV failed" in m or "nav_failed" in m.lower() or "stale" in m.lower() for _, m in logs))
+        self.assertTrue(any("ctrl+l" in a for a in desk.actions))
+        tool_blobs = " ".join(
+            str(m.get("content") or "") for payload in llm.payloads for m in payload if m.get("role") == "tool"
+        )
+        self.assertIn("nav_failed", tool_blobs)
+
+    def test_stuck_loop_forces_strategy_change(self) -> None:
+        class RecordingLLM(ScriptedLLM):
+            def __init__(self, script):
+                super().__init__(script)
+                self.payloads: list[list[dict[str, Any]]] = []
+
+            def complete(self, messages, tools):
+                self.payloads.append(messages)
+                return super().complete(messages, tools)
+
+        llm = RecordingLLM(
+            [
+                {"content": "", "tool_calls": [_call("click", '{"name":"No Such Button"}', "1")]},
+                {"content": "", "tool_calls": [_call("click", '{"name":"No Such Button"}', "2")]},
+                {"content": "", "tool_calls": [_call("click", '{"name":"No Such Button"}', "3")]},
+                {"content": "", "tool_calls": [_call("fail", '{"reason":"search box never focused"}', "4")]},
+            ]
+        )
+        result = AgentLoop(backend=MockDesktop(), llm=llm, max_steps=8).run("find brawlhalla.exe on my computer")
+        self.assertEqual(result.status, "fail")
+        fourth = llm.payloads[3]
+        user_text = " ".join(str(m.get("content") or "") for m in fourth if m.get("role") == "user")
+        self.assertIn("STUCK", user_text)
+        self.assertIn("find_files", user_text)
+
+    def test_ctrl_s_image_goal_warns(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {"content": "", "tool_calls": [_call("hotkey", '{"keys":"ctrl+s"}', "1")]},
+                {
+                    "content": "",
+                    "tool_calls": [_call("fail", '{"reason":"ctrl+s would save HTML"}', "2")],
+                },
+            ]
+        )
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=6,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("download a picture of a cat")
+        self.assertEqual(result.status, "fail")
+        self.assertTrue(any("html" in m.lower() for _, m in logs))
+
 
 if __name__ == "__main__":
     unittest.main()

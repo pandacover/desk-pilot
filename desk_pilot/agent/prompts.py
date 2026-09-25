@@ -10,12 +10,27 @@ How to act
 - drag: mouse-down (x1,y1) → move → up (x2,y2). For canvases and sliders. Optional points=[[x,y],...] polyline.
 - prepare_art: sketch/draw goals — paste-ready PNG (or geometric fallback) then ctrl+v.
 - type_text: literal characters into the focused or targeted control. Do not send shortcuts here.
-- hotkey: chords like win+r, enter, ctrl+s, alt+f4, tab, ctrl+a, win (Start), ctrl+l (browser address bar).
+- hotkey: chords like win+r, enter, alt+f4, tab, ctrl+a, win (Start), ctrl+l (browser address bar).
+- find_files: local disk search (user profile, Desktop, Documents, Downloads, Program Files, Steam). Use this FIRST to find/locate a file or .exe on this computer.
+- verify_file: after saving a download, check the path is a real image (not HTML saved as .jpg).
 - list_windows: top-level window titles and process names (not just the focused window).
 - focus_window: activate an already-open window by title or process. Use this instead of launching a second copy.
 - launch_app: start an installed program by display name only when no usable instance is open.
 - wait_for_window: after launching or switching apps. If the snapshot is a "Windows cannot find" dialog, that is NOT the app.
 - done / fail: end the run with a short result or reason.
+
+Finding files on this computer
+- Goal like "find brawlhalla.exe on my computer" → call find_files with name=brawlhalla.exe (or a glob). Then done with the full paths, or launch/open only if asked.
+- Do NOT Win+S / Start-search a filename into Edge web search. Do not hunt via File Explorer's search box to discover an unknown path (it often focuses the address bar instead).
+- Explorer is only to reveal/open a path find_files already returned, and only if the user asked to show it.
+
+Browser navigation
+- Focus the real address bar with ctrl+l before typing a URL. After Enter, the window title and/or address-bar UIA value must change toward that target.
+- A stale title (e.g. still "brawlhalla.exe - Helium" after typing a Google Images URL) is a FAILED navigation — do not claim success. The loop retries once (ctrl+l, retype, enter) and may return nav_failed plus a screenshot. Then screenshot_region / fail, do not keep typing URLs into the same stale tab.
+
+Downloading pictures
+- Never Ctrl+S on a search/results page (that saves HTML, sometimes renamed .jpg). Open/select the actual image, then Save image as or the download control; right-click Save image if UIA exposes it.
+- After a purported image save, call verify_file on the path. If it is HTML masquerading as an image, discard it and try another image.
 
 Opening / switching apps on Windows
 1. Read top_windows in the snapshot (and call list_windows if unsure). If the target app is already there, call focus_window and continue the goal. Do not launch another instance.
@@ -32,6 +47,7 @@ Rules
 - Do not close this Desk Pilot window.
 - After each action you will receive a fresh UI snapshot. Check it before the next action.
 - Be efficient. Call one action tool per turn unless a tiny combo is required (e.g. type then enter).
+- If the same action is not changing the UI, switch strategy (find_files, screenshot_region, or fail). Do not grind Explorer search-box mis-focus until the step budget.
 - When the goal is clearly complete, call done. If blocked, call fail.
 """
 
@@ -45,7 +61,7 @@ How to act
 - drag: mouse-down (x1,y1) → move → up (x2,y2). Optional points=[[x,y],...] for a polyline (rectangle outline or ellipse). This is the drawing tool.
 - prepare_art: create a paste-ready PNG (OpenRouter image if the key supports it, else a geometric icon) and copy it to the clipboard. Then focus the canvas and hotkey ctrl+v. If clipboard/paste fails, use the returned drag playbook.
 - screenshot_region: capture the window or canvas. Use this freely here — vision beats UIA on a thin tree.
-- click / hotkey: only for real chrome (address bar, Draw/Pencil tool, Select). ctrl+l then type a URL is fine. Do not "select" the canvas with a single click and call done.
+- click / hotkey: only for real chrome (address bar, Draw/Pencil tool, Select). ctrl+l then type a URL is fine — the loop checks that the title/address actually changed (nav_ok / nav_failed). Do not "select" the canvas with a single click and call done. Never Ctrl+S a search page to download an image.
 - list_windows / focus_window / launch_app / wait_for_window / done / fail: same as usual.
 - You MAY emit several drag (and a click to pick the pencil) in ONE turn. The loop executes every tool call in order before the next snapshot — a body rect plus two wheel ellipses is one turn, not twenty clicks.
 
@@ -124,8 +140,10 @@ def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool =
             "Then prepare_art or drag using the playbook. You may call several drags in this turn."
             if canvas
             else (
-                "Call a tool. If top_windows already lists the target app, call focus_window; "
-                "do not launch a second copy. Start with list_ui only if this snapshot is not enough."
+                "Call a tool. If the goal is to find/locate a file or .exe on this computer, "
+                "call find_files first — do not Win+S it into web search. If top_windows already "
+                "lists the target app, call focus_window; do not launch a second copy. "
+                "Start with list_ui only if this snapshot is not enough."
             )
         )
     )
@@ -151,10 +169,12 @@ def observation_message(
     guide: bool = False,
     canvas: bool = False,
     playbook: str = "",
+    notice: str = "",
 ) -> str:
+    prefix = f"{notice.strip()}\n\n" if (notice or "").strip() else ""
     if guide:
         return (
-            f"Step {step}/{max_steps} UI after the user continued:\n"
+            f"{prefix}Step {step}/{max_steps} UI after the user continued:\n"
             f"{_dump(snapshot)}\n"
             "Verify, then call guide_step for the next human action (with automation_id, name, "
             "expected_title, or real x,y from this tree — never 0,0), or done/fail."
@@ -165,13 +185,13 @@ def observation_message(
             "Several drag calls in this turn are OK."
         )
         return (
-            f"Step {step}/{max_steps} UI after the last action:\n"
+            f"{prefix}Step {step}/{max_steps} UI after the last action:\n"
             f"{_dump(snapshot)}\n"
             f"{hint}\n"
             "Verify from the tree/screenshot, then act again or call done/fail."
         )
     return (
-        f"Step {step}/{max_steps} UI after the last action:\n"
+        f"{prefix}Step {step}/{max_steps} UI after the last action:\n"
         f"{_dump(snapshot)}\n"
         "Verify, then act again or call done/fail."
     )
