@@ -157,7 +157,7 @@ class AgentLoop:
                         if self.canvas_mode
                         else (
                             "You must call a tool: list_windows, focus_window, launch_app, "
-                            "find_files, verify_file, an action, wait_for_window, done, or fail."
+                            "find_files, verify_file, navigate, an action, wait_for_window, done, or fail."
                         )
                     )
                 )
@@ -484,6 +484,7 @@ class AgentLoop:
         extra = {
             "llm": self.llm,
             "window_rect": self._window_rect(),
+            "log": self._log,
         }
         keys = str(args.get("keys") or "").strip().lower().replace(" ", "")
         if name == "type_text":
@@ -587,9 +588,9 @@ class AgentLoop:
 
         if not isinstance(result, dict) or not result.get("ok"):
             return
-        if name not in {"focus_window", "launch_app", "wait_for_window"}:
+        if name not in {"focus_window", "launch_app", "wait_for_window", "navigate"}:
             return
-        title = str(result.get("window") or "")
+        title = str(result.get("window") or result.get("title") or "")
         process = str(result.get("process") or "")
         if title and not is_agent_window(title, process):
             self._target_title = title

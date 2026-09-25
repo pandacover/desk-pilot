@@ -21,7 +21,16 @@ _GUIDE_PATTERNS = (
 _GUIDE_RE = re.compile("|".join(_GUIDE_PATTERNS), re.IGNORECASE)
 
 ACTION_TOOLS = frozenset(
-    {"click", "type_text", "hotkey", "launch_app", "focus_window", "wait_for_window", "screenshot_region"}
+    {
+        "click",
+        "type_text",
+        "hotkey",
+        "launch_app",
+        "focus_window",
+        "wait_for_window",
+        "screenshot_region",
+        "navigate",
+    }
 )
 
 
@@ -67,6 +76,9 @@ def instruction_for_tool(name: str, args: dict[str, Any] | None) -> str:
     if name == "focus_window":
         target = args.get("title_contains") or args.get("process_contains") or "the app"
         return f"Switch to the {target} window."
+    if name == "navigate":
+        url = args.get("url") or "the URL"
+        return f"Open {url} in the browser address bar."
     if name == "wait_for_window":
         title = args.get("title_contains") or "the window"
         return f"Wait until you see a window titled like “{title}”."

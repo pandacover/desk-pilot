@@ -80,6 +80,7 @@ Tools the model can call:
 | `drag` | Mouse-down → move → up (optional polyline). Auto mode only; for canvases |
 | `prepare_art` | Sketch/draw goals: PNG (OpenRouter image or geometric) + clipboard, else drag playbook |
 | `type_text` | Type into the focused or targeted control |
+| `navigate` | Chromium-family address bar: focus, type a URL, Enter, verify (`nav_ok` / `nav_failed`) |
 | `hotkey` | `win+r`, `enter`, `ctrl+s`, `ctrl+v`, … |
 | `list_windows` / `focus_window` | Reuse an already-open app instead of launching another copy |
 | `launch_app` | Start an installed app, or focus it if it is already running |
@@ -97,9 +98,9 @@ Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` 
 
 The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once. Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
 
-## Pull latest (0.2.1)
+## Pull latest (0.2.2)
 
-Finds files on disk, verifies browser navigation actually happened, and stops grinding a stuck Explorer/search loop.
+Atomic Chromium `navigate` (one tool call instead of ctrl+l / type / Enter thrash), plus 0.2.1 file search, nav verify, and stuck-loop breaker.
 
 ```powershell
 git pull
@@ -109,8 +110,9 @@ python -m desk_pilot
 
 Try (auto, not Guide):
 
-1. `find brawlhalla.exe on my computer` — expect `find_files` to return real paths in the step log. It must **not** open Edge via Win+S or type the filename into web search.
-2. `download a picture of a cat` (or similar) — it must **not** Ctrl+S a Google/Images results page and rename HTML to `.jpg`. Open the image, Save image as / download control, then `verify_file`.
+1. Any goal that needs opening a URL in Helium — expect a single `navigate` act in the step log, not a chain of `hotkey ctrl+l` + `type_text` + Enter.
+2. `find brawlhalla.exe on my computer` — expect `find_files` to return real paths in the step log. It must **not** open Edge via Win+S or type the filename into web search.
+3. `download a picture of a cat` (or similar) — it must **not** Ctrl+S a Google/Images results page and rename HTML to `.jpg`. Open the image, Save image as / download control, then `verify_file`.
 
 ## Auto vs Guide
 

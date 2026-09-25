@@ -10,7 +10,8 @@ How to act
 - drag: mouse-down (x1,y1) → move → up (x2,y2). For canvases and sliders. Optional points=[[x,y],...] polyline.
 - prepare_art: sketch/draw goals — paste-ready PNG (or geometric fallback) then ctrl+v.
 - type_text: literal characters into the focused or targeted control. Do not send shortcuts here.
-- hotkey: chords like win+r, enter, alt+f4, tab, ctrl+a, win (Start), ctrl+l (browser address bar).
+- hotkey: chords like win+r, enter, alt+f4, tab, ctrl+a, win (Start).
+- navigate: when a Chromium-family browser needs a different URL, call this once with the URL (optional title_contains / process_contains to pick the window). Do not split address-bar navigation across ctrl+l / type_text / enter turns.
 - find_files: local disk search (user profile, Desktop, Documents, Downloads, Program Files, Steam). Use this FIRST to find/locate a file or .exe on this computer.
 - verify_file: after saving a download, check the path is a real image (not HTML saved as .jpg).
 - list_windows: top-level window titles and process names (not just the focused window).
@@ -25,8 +26,9 @@ Finding files on this computer
 - Explorer is only to reveal/open a path find_files already returned, and only if the user asked to show it.
 
 Browser navigation
-- Focus the real address bar with ctrl+l before typing a URL. After Enter, the window title and/or address-bar UIA value must change toward that target.
-- A stale title (e.g. still "brawlhalla.exe - Helium" after typing a Google Images URL) is a FAILED navigation — do not claim success. The loop retries once (ctrl+l, retype, enter) and may return nav_failed plus a screenshot. Then screenshot_region / fail, do not keep typing URLs into the same stale tab.
+- When a Chromium-family browser (Helium, Chrome, Edge) needs a different URL, call navigate with that URL. Optional title_contains / process_contains select the window. The tool focuses the address bar, types, presses Enter, and returns nav_ok or nav_failed with the observed title/address.
+- Do not split address-bar navigation across hotkey / type_text / enter turns.
+- A stale title after navigate is a FAILED navigation — do not claim the page loaded. Then screenshot_region / fail rather than repeating the same URL.
 
 Downloading pictures
 - Never Ctrl+S on a search/results page (that saves HTML, sometimes renamed .jpg). Open/select the actual image, then Save image as or the download control; right-click Save image if UIA exposes it.
@@ -61,13 +63,13 @@ How to act
 - drag: mouse-down (x1,y1) → move → up (x2,y2). Optional points=[[x,y],...] for a polyline (rectangle outline or ellipse). This is the drawing tool.
 - prepare_art: create a paste-ready PNG (OpenRouter image if the key supports it, else a geometric icon) and copy it to the clipboard. Then focus the canvas and hotkey ctrl+v. If clipboard/paste fails, use the returned drag playbook.
 - screenshot_region: capture the window or canvas. Use this freely here — vision beats UIA on a thin tree.
-- click / hotkey: only for real chrome (address bar, Draw/Pencil tool, Select). ctrl+l then type a URL is fine — the loop checks that the title/address actually changed (nav_ok / nav_failed). Do not "select" the canvas with a single click and call done. Never Ctrl+S a search page to download an image.
-- list_windows / focus_window / launch_app / wait_for_window / done / fail: same as usual.
+- click / hotkey: only for real chrome (Draw/Pencil tool, Select). When the page URL must change, call navigate (nav_ok / nav_failed). Do not "select" the canvas with a single click and call done. Never Ctrl+S a search page to download an image.
+- list_windows / focus_window / launch_app / wait_for_window / navigate / done / fail: same as usual.
 - You MAY emit several drag (and a click to pick the pencil) in ONE turn. The loop executes every tool call in order before the next snapshot — a body rect plus two wheel ellipses is one turn, not twenty clicks.
 
 Opening tldraw
 1. If a browser or tldraw window is already in top_windows, focus_window it.
-2. Else launch_app a browser, wait, ctrl+l, type_text https://www.tldraw.com , enter.
+2. Else launch_app a browser, wait, then navigate to the canvas URL.
 3. Then draw. Do not keep clicking browser chrome.
 
 Drawing a car (when paste is unavailable)
@@ -92,7 +94,7 @@ How to guide
 - list_ui / list_windows: only if the snapshot is not enough.
 - done / fail: end the lesson.
 
-Do NOT call click, type_text, hotkey, launch_app, or focus_window. Those would act for the user.
+Do NOT call click, type_text, hotkey, launch_app, focus_window, or navigate. Those would act for the user.
 
 Opening apps
 1. If top_windows already lists the target, guide_step: switch to / click that window (name or expected_title from the list). Do not tell them to launch another copy.
@@ -140,10 +142,11 @@ def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool =
             "Then prepare_art or drag using the playbook. You may call several drags in this turn."
             if canvas
             else (
-                "Call a tool. If the goal is to find/locate a file or .exe on this computer, "
-                "call find_files first — do not Win+S it into web search. If top_windows already "
-                "lists the target app, call focus_window; do not launch a second copy. "
-                "Start with list_ui only if this snapshot is not enough."
+                "Call a tool. If a Chromium-family browser needs a different URL, call navigate "
+                "(do not split ctrl+l / type / Enter across turns). If the goal is to find/locate "
+                "a file or .exe on this computer, call find_files first — do not Win+S it into "
+                "web search. If top_windows already lists the target app, call focus_window; "
+                "do not launch a second copy. Start with list_ui only if this snapshot is not enough."
             )
         )
     )

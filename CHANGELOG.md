@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.2
+
+- **navigate** (auto mode): one atomic tool to change a Chromium-family browser (Helium / Chrome / Edge) to a URL. Focuses the window (optional `title_contains` / `process_contains`), finds the address Edit/ComboBox via UIA, types the URL, presses Enter, and polls title/address until `nav_ok` or `nav_failed`. Reuses the 0.2.1 verify helpers. Other browsers return a clear failure. Prompt tells the model to call `navigate` instead of splitting `ctrl+l` / `type_text` / Enter across turns.
+
 ## 0.2.1
 
 - **find_files** (auto mode): search the local disk (user profile, Desktop, Documents, Downloads, Program Files, Program Files (x86), Steam/common if present) by filename or glob. Returns full paths with size/mtime. The system prompt tells the model to call this first for “find/locate a file/.exe on my computer” — not Win+S into Edge, and not Explorer search-box hunting.

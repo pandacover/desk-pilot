@@ -131,9 +131,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "hotkey",
             "description": (
-                "Send a keyboard shortcut. Examples: win+r, enter, ctrl+l (browser address bar), "
-                "tab, ctrl+a, alt+f4. Do NOT use ctrl+s to download a picture from a search/"
-                "results page — that saves HTML. Prefer Save image as / a download control."
+                "Send a keyboard shortcut. Examples: win+r, enter, tab, ctrl+a, alt+f4. "
+                "To change a Chromium-family browser URL, call navigate instead of "
+                "ctrl+l / type_text / Enter. Do NOT use ctrl+s to download a picture from a "
+                "search/results page — that saves HTML. Prefer Save image as / a download control."
             ),
             "parameters": {
                 "type": "object",
@@ -197,6 +198,38 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "description": "Substring of the process stem, e.g. helium or notepad.",
                     },
                 },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "navigate",
+            "description": (
+                "Change a Chromium-family browser window (Helium, Chrome, Edge) to a URL "
+                "in one step: focus the window, find the address bar via UI Automation, "
+                "type the URL, press Enter, and verify the title/address actually changed. "
+                "Use this whenever the browser needs a different URL. Other browsers return "
+                "nav_failed. Optional title_contains / process_contains pick the window."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL to load in the address bar.",
+                    },
+                    "title_contains": {
+                        "type": "string",
+                        "description": "Optional window title substring, e.g. Helium.",
+                    },
+                    "process_contains": {
+                        "type": "string",
+                        "description": "Optional process stem, e.g. helium or chrome.",
+                    },
+                },
+                "required": ["url"],
                 "additionalProperties": False,
             },
         },
@@ -461,6 +494,18 @@ def dispatch_tool(
         return backend.focus_window(
             title_contains=_opt_str(args.get("title_contains")),
             process_contains=_opt_str(args.get("process_contains")),
+        )
+    if name == "navigate":
+        from desk_pilot.agent.nav import run_navigate
+
+        url = _opt_str(args.get("url")) or _opt_str(args.get("text"))
+        log = extra.get("log") if extra else None
+        return run_navigate(
+            backend,
+            url or "",
+            title_contains=_opt_str(args.get("title_contains")),
+            process_contains=_opt_str(args.get("process_contains")),
+            log=log,
         )
     if name == "launch_app":
         app = _opt_str(args.get("name"))
