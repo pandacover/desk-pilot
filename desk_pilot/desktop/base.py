@@ -48,3 +48,7 @@ class DesktopBackend(ABC):
         timeout_seconds: float = 8.0,
     ) -> dict[str, Any]:
         """Wait until the foreground window title matches."""
+
+    @abstractmethod
+    def launch_app(self, name: str) -> dict[str, Any]:
+        """Start an installed app by display name / executable (not Win+R PATH)."""
