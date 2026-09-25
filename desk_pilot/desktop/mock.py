@@ -48,6 +48,7 @@ class MockDesktop(DesktopBackend):
         self.steal_focus_after_action = False
         self.address_value = ""
         self.stale_nav = False
+        self.hide_address_bar = False
         self.files_catalog: list[dict[str, Any]] = [
             {
                 "path": r"C:\Program Files (x86)\Steam\steamapps\common\Brawlhalla\Brawlhalla.exe",
@@ -699,14 +700,34 @@ class MockDesktop(DesktopBackend):
                 "process": "helium",
                 "rect": [80, 40, 1280, 800],
             }
-            focused = _ctrl(
+            address = _ctrl(
                 name="Address and search bar",
                 ctype="Edit",
                 aid="urlbar",
                 rect=[140, 48, 720, 76],
                 path=f"{title}/Toolbar/Address",
             )
-            focused = {**focused, "value": self.address_value}
+            address = {**address, "value": self.address_value}
+            document = _ctrl(
+                name="Document",
+                ctype="Document",
+                aid="Chrome_RenderWidgetHostHWND",
+                rect=[80, 88, 1280, 800],
+                path=f"{title}/Document",
+            )
+            if getattr(self, "hide_address_bar", False):
+                focused = document
+                chrome = [
+                    _ctrl(name=title, ctype="Window", aid="Browser", rect=[80, 40, 1280, 800], path=title),
+                    _ctrl(name="Back", ctype="Button", aid="back", rect=[90, 48, 118, 76], path=f"{title}/Toolbar/Back"),
+                    _ctrl(name="Forward", ctype="Button", aid="fwd", rect=[118, 48, 146, 76], path=f"{title}/Toolbar/Forward"),
+                    _ctrl(name="Reload", ctype="Button", aid="reload", rect=[146, 48, 174, 76], path=f"{title}/Toolbar/Reload"),
+                    _ctrl(name="tldraw", ctype="TabItem", aid="tab", rect=[180, 12, 280, 40], path=f"{title}/Tab"),
+                    document,
+                    _ctrl(name="Close", ctype="Button", aid="Close", rect=[1248, 44, 1272, 68], path=f"{title}/TitleBar/Close"),
+                ]
+                return window, focused, chrome
+            focused = address
             # Chrome chrome only — the tldraw canvas is not in UIA (live ~10 controls).
             controls = [
                 _ctrl(name=title, ctype="Window", aid="Browser", rect=[80, 40, 1280, 800], path=title),
@@ -715,7 +736,7 @@ class MockDesktop(DesktopBackend):
                 _ctrl(name="Reload", ctype="Button", aid="reload", rect=[146, 48, 174, 76], path=f"{title}/Toolbar/Reload"),
                 focused,
                 _ctrl(name="tldraw", ctype="TabItem", aid="tab", rect=[180, 12, 280, 40], path=f"{title}/Tab"),
-                _ctrl(name="Document", ctype="Document", aid="Chrome_RenderWidgetHostHWND", rect=[80, 88, 1280, 800], path=f"{title}/Document"),
+                document,
                 _ctrl(name="Close", ctype="Button", aid="Close", rect=[1248, 44, 1272, 68], path=f"{title}/TitleBar/Close"),
             ]
             return window, focused, controls

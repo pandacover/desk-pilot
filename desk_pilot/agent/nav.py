@@ -1,4 +1,4 @@
-"""Address-bar navigation verification (stale title / UIA value)."""
+"""Address-bar navigation: atomic Chromium navigate + stale title / UIA verify."""
 
 from __future__ import annotations
 
@@ -32,6 +32,21 @@ GENERIC_TOKENS = {
     "and",
     "search",
 }
+ADDRESS_CONTROL_TYPES = {"edit", "combobox"}
+CHROMIUM_FAMILY_HINTS = (
+    "chrome",
+    "msedge",
+    "msedgewebview2",
+    "helium",
+    "chromium",
+    "brave",
+    "opera",
+    "vivaldi",
+    "arc",
+    "edgium",
+    "chrome_widgetwin",
+    "chrome_renderwidgethosthwnd",
+)
 
 
 def is_url_like(text: str | None) -> bool:
@@ -118,6 +133,224 @@ def nav_fingerprint(snapshot: dict[str, Any] | None) -> dict[str, str]:
         "address": extract_address_value(snapshot),
         "focused": str((focused or {}).get("name") or ""),
     }
+
+
+def _window_blob(snapshot: dict[str, Any] | None) -> str:
+    if not snapshot:
+        return ""
+    window = snapshot.get("window") if isinstance(snapshot.get("window"), dict) else {}
+    parts = [
+        str((window or {}).get("name") or ""),
+        str((window or {}).get("process") or ""),
+        str((window or {}).get("class") or ""),
+    ]
+    return " ".join(parts).lower()
+
+
+def chromium_family_status(snapshot: dict[str, Any] | None) -> tuple[bool, str]:
+    """Chromium-family first (Helium / Chrome / Edge). Other browsers are a clear miss."""
+    window = snapshot.get("window") if snapshot and isinstance(snapshot.get("window"), dict) else {}
+    name = str((window or {}).get("name") or "").strip()
+    process = str((window or {}).get("process") or "").strip()
+    klass = str((window or {}).get("class") or "").strip()
+    observed = name or process or klass or "unknown window"
+    if process:
+        observed = f"{name or 'window'} ({process})"
+    blob = _window_blob(snapshot)
+    if any(hint in blob for hint in CHROMIUM_FAMILY_HINTS):
+        return True, observed
+    title = name.lower()
+    if title.endswith(" - helium") or " - google chrome" in title or title.endswith(" - microsoft edge"):
+        return True, observed
+    return False, observed
+
+
+def address_control_from_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Best Chromium address Edit/ComboBox from a compact list_ui tree."""
+    if not snapshot:
+        return None
+    best: dict[str, Any] | None = None
+    best_score = 0
+    for item in snapshot.get("controls") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").lower()
+        aid = str(item.get("automation_id") or "").lower()
+        path = str(item.get("path") or "").lower()
+        ctype = str(item.get("type") or "").lower()
+        blob = f"{name} {aid} {path}"
+        if not any(hint in blob for hint in ADDRESS_HINTS):
+            continue
+        if ctype and ctype not in ADDRESS_CONTROL_TYPES and "edit" not in ctype and "combo" not in ctype:
+            continue
+        score = 0
+        if "address and search" in name:
+            score += 6
+        elif "address" in name:
+            score += 4
+        if aid in {"urlbar", "omnibox"} or "urlbar" in aid:
+            score += 5
+        if any(hint in blob for hint in ADDRESS_HINTS):
+            score += 1
+        if ctype in ADDRESS_CONTROL_TYPES:
+            score += 1
+        if score > best_score:
+            best_score = score
+            best = item
+    if best:
+        return best
+    focused = snapshot.get("focused") if isinstance(snapshot.get("focused"), dict) else {}
+    if focused and focused_looks_like_address(snapshot):
+        ctype = str((focused or {}).get("type") or "").lower()
+        if not ctype or ctype in ADDRESS_CONTROL_TYPES or "edit" in ctype or "combo" in ctype:
+            return dict(focused)
+    return None
+
+
+def _nav_payload(
+    *,
+    ok: bool,
+    reason: str,
+    target: str,
+    before: dict[str, str] | None = None,
+    after: dict[str, str] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    before = dict(before or {})
+    after = dict(after or {})
+    payload: dict[str, Any] = {
+        "ok": ok,
+        "nav_ok": ok,
+        "nav_failed": not ok,
+        "reason": reason,
+        "target": target,
+        "before": before,
+        "after": after,
+        "title": after.get("title") or before.get("title") or "",
+        "address": (after.get("address") or before.get("address") or "")[:240],
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _snapshot(backend: Any) -> dict[str, Any] | None:
+    try:
+        snap = backend.list_ui(max_depth=4, max_controls=50)
+    except Exception:
+        return None
+    return snap if isinstance(snap, dict) else None
+
+
+def run_navigate(
+    backend: Any,
+    url: str,
+    *,
+    title_contains: str | None = None,
+    process_contains: str | None = None,
+    log=None,
+) -> dict[str, Any]:
+    """Atomic Chromium address-bar navigation: focus, type URL, Enter, verify."""
+    target = (url or "").strip()
+    if not target:
+        return _nav_payload(ok=False, reason="navigate requires a url.", target="")
+
+    if title_contains or process_contains:
+        try:
+            focused = backend.focus_window(
+                title_contains=title_contains,
+                process_contains=process_contains,
+            )
+        except Exception as exc:
+            return _nav_payload(
+                ok=False,
+                reason=f"navigate could not focus the browser window: {exc}",
+                target=target,
+            )
+        if isinstance(focused, dict) and not focused.get("ok", True):
+            return _nav_payload(
+                ok=False,
+                reason=str(focused.get("error") or "navigate could not focus the browser window."),
+                target=target,
+                extra={"focus": focused},
+            )
+
+    snapshot = _snapshot(backend)
+    is_chromium, observed = chromium_family_status(snapshot)
+    if not is_chromium:
+        after = nav_fingerprint(snapshot)
+        return _nav_payload(
+            ok=False,
+            reason=(
+                "navigate supports Chromium-family browsers (Helium, Chrome, Edge). "
+                f"Foreground is {observed}."
+            ),
+            target=target,
+            before=after,
+            after=after,
+        )
+
+    address = address_control_from_snapshot(snapshot)
+    if not address:
+        after = nav_fingerprint(snapshot)
+        return _nav_payload(
+            ok=False,
+            reason="missing address control: no Chromium address Edit/ComboBox in the UIA tree",
+            target=target,
+            before=after,
+            after=after,
+        )
+
+    aid = str(address.get("automation_id") or "").strip() or None
+    name = str(address.get("name") or "").strip() or None
+    if log:
+        log("act", f"NAV address control: name={name!r} automation_id={aid!r}")
+    try:
+        backend.click(automation_id=aid, name=name)
+    except Exception:
+        pass
+    try:
+        typed = backend.type_text(str(target), automation_id=aid, name=name, clear=True)
+    except Exception as exc:
+        after = nav_fingerprint(_snapshot(backend))
+        return _nav_payload(
+            ok=False,
+            reason=f"navigate could not type the URL: {exc}",
+            target=target,
+            after=after,
+        )
+    if isinstance(typed, dict) and typed.get("ok") is False:
+        after = nav_fingerprint(_snapshot(backend))
+        return _nav_payload(
+            ok=False,
+            reason=str(typed.get("error") or "navigate could not type the URL."),
+            target=target,
+            after=after,
+            extra={"typed": typed},
+        )
+
+    before = nav_fingerprint(_snapshot(backend) or snapshot)
+    try:
+        enter_result = backend.hotkey("enter")
+    except Exception as exc:
+        enter_result = {"ok": False, "error": f"enter failed: {exc}"}
+    if not isinstance(enter_result, dict):
+        enter_result = {"ok": bool(enter_result)}
+
+    checked = verify_enter_navigation(backend, target, before, enter_result, log=log)
+    after = checked.get("after") if isinstance(checked.get("after"), dict) else nav_fingerprint(_snapshot(backend))
+    checked["title"] = str((after or {}).get("title") or checked.get("title") or "")
+    checked["address"] = str((after or {}).get("address") or checked.get("address") or "")[:240]
+    checked["target"] = target
+    checked["window"] = checked["title"]
+    if checked.get("nav_ok"):
+        checked["ok"] = True
+        checked["nav_failed"] = False
+    else:
+        checked["ok"] = False
+        checked["nav_ok"] = False
+        checked["nav_failed"] = True
+    return checked
 
 
 def target_tokens(target: str) -> list[str]:

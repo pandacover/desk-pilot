@@ -27,6 +27,7 @@ class ToolDispatchTests(unittest.TestCase):
                 "find_files",
                 "verify_file",
                 "guide_step",
+                "navigate",
                 "done",
                 "fail",
             },
@@ -176,6 +177,18 @@ class ToolDispatchTests(unittest.TestCase):
             result = dispatch_tool(self.desk, "verify_file", {"path": str(path), "expect": "image"})
             self.assertFalse(result["ok"])
             self.assertIn("html", (result.get("error") or "").lower())
+
+    def test_dispatch_navigate_success(self) -> None:
+        self.desk._open_tldraw()
+        result = dispatch_tool(self.desk, "navigate", {"url": "https://images.google.com"})
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["nav_ok"])
+        self.assertIn("google", self.desk.window_title.lower())
+
+    def test_dispatch_navigate_requires_url(self) -> None:
+        result = dispatch_tool(self.desk, "navigate", {})
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("nav_failed"))
 
 
 if __name__ == "__main__":

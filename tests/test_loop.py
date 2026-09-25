@@ -238,6 +238,34 @@ class AgentLoopTests(unittest.TestCase):
         )
         self.assertIn("nav_failed", tool_blobs)
 
+    def test_navigate_tool_is_one_act(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [_call("navigate", '{"url":"https://images.google.com"}', "1")],
+                },
+                {
+                    "content": "",
+                    "tool_calls": [_call("done", '{"result":"opened the page"}', "2")],
+                },
+            ]
+        )
+        desk = MockDesktop()
+        desk._open_tldraw()
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=6,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("open a URL in Helium")
+        self.assertEqual(result.status, "done")
+        self.assertIn("google", desk.window_title.lower())
+        acts = [m for k, m in logs if k == "act"]
+        self.assertTrue(any(m.startswith("navigate ") for m in acts))
+        self.assertFalse(any("ctrl+l" in m.lower() for m in acts))
+
     def test_stuck_loop_forces_strategy_change(self) -> None:
         class RecordingLLM(ScriptedLLM):
             def __init__(self, script):
