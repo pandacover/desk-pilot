@@ -35,6 +35,15 @@ class SketchPathTests(unittest.TestCase):
         self.assertEqual(normalize_rect([40, 30, 10, 5]), (10, 5, 40, 30))
         self.assertEqual(normalize_rect(None), (0, 0, 0, 0))
 
+    def test_as_rect_accepts_tuple_and_list(self) -> None:
+        from desk_pilot.desktop.rects import as_rect
+
+        self.assertEqual(as_rect((40, 30, 10, 5)), [10, 5, 40, 30])
+        self.assertEqual(as_rect([200, 100, 340, 180]), [200, 100, 340, 180])
+        self.assertIsNone(as_rect(None))
+        self.assertIsNone(as_rect([0, 0, 0, 0]))
+        self.assertIsNone(as_rect("nope"))
+
     def test_expand_tiny(self) -> None:
         left, top, right, bottom = expand_tiny_rect(50, 50, 52, 51, min_size=12)
         self.assertGreaterEqual(right - left, 12)
@@ -52,7 +61,13 @@ class SketchPathTests(unittest.TestCase):
 class OverlayNoopTests(unittest.TestCase):
     def test_linux_overlay_is_noop(self) -> None:
         overlay = HighlightOverlay()
-        self.assertFalse(overlay.show([10, 10, 80, 40]))
+        result = overlay.show([10, 10, 80, 40])
+        self.assertFalse(result["ok"])
+        self.assertTrue(result.get("skipped"))
+        self.assertEqual(result.get("rect"), [10, 10, 80, 40])
+        empty = overlay.show(None)
+        self.assertTrue(empty.get("skipped"))
+        self.assertIn("no rect", empty.get("error") or "")
         overlay.flash([10, 10, 80, 40], duration=1.0)
         overlay.hide()
         overlay.close()
@@ -109,11 +124,18 @@ class GuideLoopTests(unittest.TestCase):
             ]
         )
         desk = MockDesktop()
-        result = AgentLoop(backend=desk, llm=llm, max_steps=5).run("Open Notepad")
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=5,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Open Notepad")
         self.assertEqual(result.status, "done")
         self.assertEqual(desk.highlights, [])
         self.assertIsNone(desk.highlight_visible)
         self.assertTrue(any(a.startswith("launch_app") for a in desk.actions))
+        self.assertFalse(any(k == "sketch" for k, _ in logs))
 
     def test_guide_sketches_and_does_not_click(self) -> None:
         waits: list[str] = []
@@ -153,6 +175,140 @@ class GuideLoopTests(unittest.TestCase):
         self.assertNotIn("click", llm.tool_names)
         left, top, right, bottom = desk.highlights[0]
         self.assertLess(left, right)
+        self.assertIsNone(desk.highlight_visible)
+
+    def test_instruction_only_skips_sketch_and_does_not_wait(self) -> None:
+        waits: list[str] = []
+        logs: list[tuple[str, str]] = []
+
+        def await_step() -> str:
+            waits.append("wait")
+            return "continue"
+
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [_call("guide_step", '{"instruction":"Click Start"}', "1")],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"retried"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=6,
+            force_guide=True,
+            await_step=await_step,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("how to click Start")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(waits, [])
+        self.assertEqual(desk.highlights, [])
+        self.assertTrue(
+            any(k == "sketch" and "skipped: no rect (need name/automation_id/xy)" in m for k, m in logs)
+        )
+
+    def test_failed_blit_logs_sketch_failed(self) -> None:
+        waits: list[str] = []
+        logs: list[tuple[str, str]] = []
+
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call("guide_step", '{"instruction":"Click Start","name":"Start"}', "1")
+                    ],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        desk.fail_highlight = True
+        desk.fail_highlight_error = "UpdateLayeredWindow failed (GetLastError=87)"
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=6,
+            force_guide=True,
+            await_step=lambda: waits.append("wait") or "continue",
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("how to click Start")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(waits, ["wait"])
+        self.assertEqual(desk.highlights, [])
+        self.assertTrue(any(k == "sketch" and m.startswith("failed:") for k, m in logs))
+        self.assertTrue(any("GetLastError=87" in m for _, m in logs))
+
+    def test_guide_name_resolves_rect(self) -> None:
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call("guide_step", '{"instruction":"Click Start","name":"Start"}', "1")
+                    ],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"clicked"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=5,
+            force_guide=True,
+            await_step=lambda: "continue",
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("guide me through Start")
+        self.assertEqual(desk.highlights, [[0, 1040, 48, 1080]])
+        self.assertTrue(any(k == "sketch" and "[0, 1040, 48, 1080]" in m for k, m in logs))
+        self.assertFalse(any("skipped:" in m or m.startswith("failed:") for k, m in logs))
+
+    def test_mock_highlight_accepts_tuple(self) -> None:
+        desk = MockDesktop()
+        result = desk.show_highlight((10, 20, 40, 60))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("rect"), [10, 20, 40, 60])
+        self.assertEqual(desk.highlights, [[10, 20, 40, 60]])
+        desk.hide_highlight()
+        self.assertIsNone(desk.highlight_visible)
+
+    def test_missing_name_falls_back_to_window(self) -> None:
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call(
+                            "guide_step",
+                            '{"instruction":"Click the mystery button","name":"NoSuchControl"}',
+                            "1",
+                        )
+                    ],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        hints: list[str] = []
+        AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=5,
+            force_guide=True,
+            await_step=lambda: "continue",
+            on_log=lambda k, m: logs.append((k, m)),
+            on_guide_step=lambda text: hints.append(text),
+        ).run("how to click a missing control")
+        self.assertEqual(len(desk.highlights), 1)
+        self.assertEqual(desk.highlights[0], [0, 0, 1920, 1080])
+        self.assertTrue(any("window fallback" in m for k, m in logs if k == "sketch"))
+        self.assertTrue(any("whole window is highlighted as a fallback" in t for t in hints if t))
 
     def test_how_to_goal_enables_guide_without_toggle(self) -> None:
         llm = ScriptedLLM(
