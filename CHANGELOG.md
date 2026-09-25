@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.7
+
+- Do not sketch the (0,0) ±12 placeholder (`[-12,-12,12,12]`). `find_control_rect` rejects origin coordinates; overlay/guide log `SKETCH skipped` with a reason instead of painting a corner box. Switching to an already-open Chrome/Helium/ChatGPT window uses `list_windows` title match and sketches that window's bounds.
+- Fix x64 `OverflowError: int too long to convert` in overlay blit: SetWindowPos / UpdateLayeredWindow / GetDC / SelectObject / CreateDIBSection now have pointer-sized `HWND`/`HDC`/`HBITMAP` argtypes. HWND_TOPMOST is a HANDLE, not a 32-bit int. Absurd rects are discarded before blit.
+
 ## 0.1.6
 
 - Fix Win32 sketch overlay: some Python builds lack `ctypes.wintypes.HCURSOR` (and similar HANDLE aliases). Overlay create now maps those to `HANDLE` / `c_void_p` instead of raising `AttributeError`. Test sketch and guide steps can paint again.
