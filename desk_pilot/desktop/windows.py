@@ -53,7 +53,7 @@ def _escape_sendkeys(text: str) -> str:
     out: list[str] = []
     for ch in text:
         if ch == "{":
-            out.append("{{}")
+            out.append("{{")
         elif ch == "}":
             out.append("{}}")
         else:
@@ -138,8 +138,6 @@ class WindowsDesktop(DesktopBackend):
         inner = getattr(auto, "uiautomation", auto)
         inner.SetGlobalSearchTimeout(3)
         self._start_apps_cache: list[dict[str, str]] | None = None
-        self.highlight_overlay = True
-        self.highlight_duration = 0.4
 
     def _prepare(self) -> dict[str, Any] | None:
         from desk_pilot.desktop.com import bind_uia_to_this_thread
@@ -295,7 +293,6 @@ class WindowsDesktop(DesktopBackend):
                 pass
             try:
                 rect = _rect_list(control.BoundingRectangle)
-                self.flash_highlight(rect)
                 control.Click()
                 return {
                     "ok": True,
@@ -311,8 +308,7 @@ class WindowsDesktop(DesktopBackend):
                 if len(rect) == 4 and rect[2] > rect[0]:
                     cx = (rect[0] + rect[2]) // 2
                     cy = (rect[1] + rect[3]) // 2
-                    self.flash_highlight(rect)
-                    fallback = self._click_xy(cx, cy, highlight=False)
+                    fallback = self._click_xy(cx, cy)
                     fallback["note"] = f"UIA Click failed ({exc}); used coordinate fallback."
                     return fallback
                 return {"ok": False, "error": f"Click failed: {exc}"}
@@ -346,7 +342,6 @@ class WindowsDesktop(DesktopBackend):
                 control.SetFocus()
             except Exception:
                 pass
-            self.flash_highlight(_rect_list(getattr(control, "BoundingRectangle", None)))
             if clear:
                 try:
                     pattern = control.GetPattern(auto.PatternId.ValuePattern)
@@ -805,28 +800,49 @@ class WindowsDesktop(DesktopBackend):
             return None
         return None
 
-    def flash_highlight(self, rect: list[int] | tuple[int, ...] | None, duration: float | None = None) -> None:
-        if not self.highlight_overlay:
-            return
+    def find_control_rect(
+        self,
+        automation_id: str | None = None,
+        name: str | None = None,
+        x: int | None = None,
+        y: int | None = None,
+    ) -> list[int] | None:
+        prep = self._prepare()
+        if prep:
+            return None
+        if automation_id or name:
+            control = self._find_control(automation_id, name)
+            if control is not None:
+                rect = _rect_list(getattr(control, "BoundingRectangle", None))
+                if len(rect) == 4 and (rect[2] > rect[0] or rect[3] > rect[1]):
+                    return rect
+        if x is not None and y is not None:
+            return [int(x) - 12, int(y) - 12, int(x) + 12, int(y) + 12]
+        return None
+
+    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> None:
         if not rect or len(rect) < 4:
             return
         try:
-            from desk_pilot.desktop.overlay import HIGHLIGHT_SECONDS, get_overlay
+            from desk_pilot.desktop.overlay import get_overlay
             from desk_pilot.desktop.sketch import normalize_rect
 
             left, top, right, bottom = normalize_rect(rect)
             if (right - left) < 1 and (bottom - top) < 1:
                 return
-            wait = self.highlight_duration if duration is None else duration
-            if wait is None:
-                wait = HIGHLIGHT_SECONDS
-            get_overlay().flash(rect, duration=float(wait))
+            get_overlay().show(rect)
         except Exception:
             return
 
-    def _click_xy(self, x: int, y: int, *, highlight: bool = True) -> dict[str, Any]:
-        if highlight:
-            self.flash_highlight([int(x) - 12, int(y) - 12, int(x) + 12, int(y) + 12])
+    def hide_highlight(self) -> None:
+        try:
+            from desk_pilot.desktop.overlay import get_overlay
+
+            get_overlay().hide()
+        except Exception:
+            return
+
+    def _click_xy(self, x: int, y: int) -> dict[str, Any]:
         try:
             self.auto.Click(x, y)
             return {"ok": True, "clicked": {"x": x, "y": y}, "method": "uiautomation.Click"}
