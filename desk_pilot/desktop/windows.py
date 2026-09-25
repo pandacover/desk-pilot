@@ -520,7 +520,7 @@ class WindowsDesktop(DesktopBackend):
             if start_file(candidate):
                 return {
                     "ok": True,
-                    "method": "path",
+                    "method": "app_paths",
                     "started": candidate,
                     "tried": tried,
                     "hint": "Wait for the window, then list_ui.",
