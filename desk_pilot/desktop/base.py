@@ -19,9 +19,22 @@ class DesktopBackend(ABC):
         """UIA bounding rect for a control, without clicking or typing."""
         return None
 
-    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> None:
-        """Persistent sketch overlay for guide mode. No-op off Windows."""
-        return
+    def focused_window_rect(self) -> list[int] | None:
+        """Bounding rect of the focused top-level window, if known."""
+        return None
+
+    def window_rect_by_title(self, title: str) -> list[int] | None:
+        """Bounding rect of an open window whose title matches ``title``."""
+        return None
+
+    def show_highlight(self, rect: list[int] | tuple[int, ...] | None) -> dict[str, Any]:
+        """Persistent sketch overlay for guide mode. Returns {ok, skipped, error, rect}."""
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+
+        box = as_rect(rect)
+        if not box:
+            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+        return {"ok": False, "skipped": True, "error": "overlay only on Windows", "rect": box}
 
     def hide_highlight(self) -> None:
         return
