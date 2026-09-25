@@ -53,7 +53,7 @@ def _escape_sendkeys(text: str) -> str:
     out: list[str] = []
     for ch in text:
         if ch == "{":
-            out.append("{{}")
+            out.append("{{")
         elif ch == "}":
             out.append("{}}")
         else:
@@ -249,6 +249,7 @@ class WindowsDesktop(DesktopBackend):
                 "Dismiss this dialog (OK/Enter), then call launch_app with the display name, "
                 "or search Start (hotkey win, type the name, enter)."
             )
+        result["top_windows"] = self._top_window_summaries()
         return result
 
     def _com_failure(self, exc: Any, window: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -489,6 +490,14 @@ class WindowsDesktop(DesktopBackend):
         query = (name or "").strip()
         if not query:
             return {"ok": False, "error": "launch_app requires a name."}
+
+        existing = self._focus_matching_window(query)
+        if existing.get("ok"):
+            existing["reused"] = True
+            existing["method"] = "existing_window"
+            existing["hint"] = "An instance was already open; focused it instead of launching another."
+            return existing
+
         tried: list[str] = []
 
         for candidate in which_candidates(query):
@@ -544,6 +553,151 @@ class WindowsDesktop(DesktopBackend):
             ),
             "tried": tried[:16],
         }
+
+    def list_windows(self) -> dict[str, Any]:
+        prep = self._prepare()
+        if prep:
+            return prep
+        windows = self._top_window_summaries()
+        return {
+            "ok": True,
+            "windows": windows,
+            "hint": "If the target app is listed, call focus_window instead of launch_app.",
+        }
+
+    def focus_window(
+        self,
+        title_contains: str | None = None,
+        process_contains: str | None = None,
+    ) -> dict[str, Any]:
+        prep = self._prepare()
+        if prep:
+            return prep
+        query = (title_contains or process_contains or "").strip()
+        if not query:
+            return {"ok": False, "error": "focus_window needs title_contains or process_contains."}
+        result = self._focus_matching_window(query)
+        if result.get("ok"):
+            return result
+        return {
+            "ok": False,
+            "error": f"No open window matching {query!r}.",
+            "windows": self._top_window_summaries(),
+        }
+
+    def _top_window_summaries(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        try:
+            for control in self._iter_top_windows():
+                summary = self._window_summary(control)
+                if summary:
+                    items.append(summary)
+                if len(items) >= 24:
+                    break
+        except Exception:
+            return items
+        return items
+
+    def _iter_top_windows(self) -> list[Any]:
+        auto = self.auto
+        try:
+            root = auto.GetRootControl()
+        except Exception:
+            return []
+        found: list[Any] = []
+        try:
+            for control, _depth in auto.WalkControl(root, includeTop=False, maxDepth=1):
+                found.append(control)
+        except Exception:
+            return found
+        return found
+
+    def _window_summary(self, control: Any) -> dict[str, Any] | None:
+        try:
+            name = (control.Name or "").strip()
+        except Exception:
+            return None
+        if not name:
+            return None
+        try:
+            class_name = (getattr(control, "ClassName", "") or "").strip()
+        except Exception:
+            class_name = ""
+        if class_name.lower() in {"progman", "workerw", "shell_traywnd"}:
+            return None
+        process = ""
+        try:
+            process = _process_stem(int(control.ProcessId))
+        except Exception:
+            process = ""
+        focused = False
+        try:
+            fg = self.auto.GetForegroundControl()
+            focused = bool(fg is not None and self.auto.ControlsAreSame(control, fg))
+        except Exception:
+            focused = False
+        return {
+            "name": name[:120],
+            "class": class_name,
+            "process": process,
+            "focused": focused,
+        }
+
+    def _focus_matching_window(self, query: str) -> dict[str, Any]:
+        from desk_pilot.desktop.launch import is_agent_window, window_match_score
+
+        best: tuple[int, Any, dict[str, Any]] | None = None
+        for control in self._iter_top_windows():
+            summary = self._window_summary(control)
+            if not summary:
+                continue
+            if is_agent_window(summary.get("name") or "", summary.get("process") or ""):
+                continue
+            score = window_match_score(
+                query,
+                title=summary.get("name") or "",
+                process=summary.get("process") or "",
+            )
+            if score < 55:
+                continue
+            if best is None or score > best[0]:
+                best = (score, control, summary)
+        if best is None:
+            return {"ok": False, "error": f"No open window matching {query!r}."}
+        _score, control, summary = best
+        activated = self._activate_control(control)
+        activated["window"] = summary.get("name") or ""
+        activated["process"] = summary.get("process") or ""
+        activated["score"] = _score
+        return activated
+
+    def _activate_control(self, control: Any) -> dict[str, Any]:
+        import ctypes
+
+        hwnd = 0
+        try:
+            hwnd = int(control.NativeWindowHandle or 0)
+        except Exception:
+            hwnd = 0
+        if hwnd:
+            try:
+                ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                ctypes.windll.user32.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+        try:
+            control.SetActive()
+        except Exception:
+            pass
+        try:
+            control.SetFocus()
+        except Exception:
+            pass
+        try:
+            name = control.Name or ""
+        except Exception:
+            name = ""
+        return {"ok": True, "window": name, "method": "focus"}
 
     def _window_meta(self, window: Any) -> dict[str, Any]:
         try:
@@ -706,4 +860,28 @@ class WindowsDesktop(DesktopBackend):
                 kb.release(key)
             return {"ok": True, "keys": "+".join(parts), "method": "pynput"}
         except Exception as exc:
-            return {"ok": False, "error": f"hotkey fallback failed: {exc}"}
+                return {"ok": False, "error": f"hotkey fallback failed: {exc}"}
+
+
+def _process_stem(pid: int) -> str:
+    if not pid:
+        return ""
+    import ctypes
+    from ctypes import wintypes
+    from pathlib import Path
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+    if not handle:
+        return ""
+    try:
+        size = wintypes.DWORD(32768)
+        buf = ctypes.create_unicode_buffer(32768)
+        if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return Path(buf.value).stem.lower()
+    except Exception:
+        return ""
+    finally:
+        kernel32.CloseHandle(handle)
+    return ""
