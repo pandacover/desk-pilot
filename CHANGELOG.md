@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.5
+
+- Guide sketch is no longer silent: the live log always prints `SKETCH` with the rect, `SKETCH skipped: no rect (need name/automation_id/xy)`, or `SKETCH failed:` plus the Win32/`GetLastError` (or exception). Overlay create/blit errors are not swallowed.
+- `guide_step` must include `automation_id`, `name`, or `x,y` from the latest `list_ui`. Instruction-only calls are rejected so the model retries. Name lookup is case-insensitive contains; if the control is still missing, the focused (or titled) window is sketched as a fallback.
+- Settings **Test sketch** draws a fixed rectangle for 2 seconds so you can tell a Win32 overlay failure apart from a targeting miss.
+- Rects accept list or tuple. The overlay stays up until Continue, then hides.
+
 ## 0.1.4
 
 - Guide / how-to mode: goals like “how to …” or Settings **Guide mode** sketch each target and wait for you (Continue / F8). The agent does not click or type those steps. Auto goals have no overlay.

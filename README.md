@@ -92,15 +92,27 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 ## Auto vs Guide
 
 - **Auto** (default): a goal like `Open Helium and search for a dank meme` — the agent clicks and types. No sketch overlay.
-- **Guide**: a goal like `How to open Helium and search for a dank meme`, or Settings **Guide mode**. The agent sketches one control, shows an instruction, and waits. You do the click or type. Then **Continue** (or F8). STOP cancels the lesson.
+- **Guide**: a goal like `How to open Helium and search for a dank meme`, or Settings **Guide mode**. The agent sketches one control, shows an instruction, and waits. You do the click or type. Then **Continue** (or F8). STOP cancels the lesson. The live log always records `SKETCH` (rect), `SKETCH skipped`, or `SKETCH failed`. Settings **Test sketch** draws a fixed rectangle for 2 seconds so you can tell the Win32 overlay apart from targeting.
 
 ```
 observe → plan one human step → sketch → you act → Continue → next step → done
 ```
 
+## Pull latest (0.1.5)
+
+Guide mode now logs every sketch attempt. If you still see “Your turn” with no desktop outline, look for `SKETCH skipped` or `SKETCH failed` in the live step log. Settings **Test sketch** draws a fixed rectangle for 2 seconds (overlay vs targeting).
+
+```powershell
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Then: a how-to goal (or Guide mode) should sketch the control — or explain why it did not. Use **Test sketch** first if you are unsure the overlay can paint.
+
 ## Pull latest (0.1.4)
 
-Sketch is for how-to lessons only — not agent auto-clicks:
+Sketch is for how-to lessons only — not agent auto-clicks. 0.1.5 adds sketch logging and a Test sketch button.
 
 ```powershell
 git pull
