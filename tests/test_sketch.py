@@ -209,6 +209,130 @@ class OverlayNoopTests(unittest.TestCase):
         dll.CreateDIBSection.restype(big)
 
 
+class OverlayMarshalTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        from desk_pilot.desktop.overlay import close_overlay, set_overlay_pump
+
+        set_overlay_pump(None)
+        close_overlay()
+
+    def test_no_pump_runs_inline(self) -> None:
+        from desk_pilot.desktop.overlay import call_on_overlay_thread, overlay_owner_thread_id
+
+        self.assertIsNone(overlay_owner_thread_id())
+        me = threading.get_ident()
+        self.assertEqual(call_on_overlay_thread(lambda: threading.get_ident()), me)
+
+    def test_same_thread_skips_pump(self) -> None:
+        from desk_pilot.desktop.overlay import call_on_overlay_thread, set_overlay_pump
+
+        pumped: list[int] = []
+
+        def pump(fn: Any) -> None:
+            pumped.append(1)
+            fn()
+
+        set_overlay_pump(pump)
+        self.assertEqual(call_on_overlay_thread(lambda: 7), 7)
+        self.assertEqual(pumped, [])
+
+    def test_worker_job_runs_on_owner_via_queue(self) -> None:
+        import queue as queue_mod
+
+        from desk_pilot.desktop.overlay import (
+            call_on_overlay_thread,
+            overlay_owner_thread_id,
+            overlay_thread_note,
+            set_overlay_pump,
+        )
+
+        jobs: queue_mod.Queue[Any] = queue_mod.Queue()
+        owner = threading.get_ident()
+
+        def pump(fn: Any) -> None:
+            jobs.put(fn)
+
+        set_overlay_pump(pump)
+        self.assertEqual(overlay_owner_thread_id(), owner)
+        seen: dict[str, int] = {}
+
+        def worker() -> None:
+            seen["tid"] = call_on_overlay_thread(lambda: threading.get_ident())
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        deadline = time.time() + 2
+        while thread.is_alive() and time.time() < deadline:
+            try:
+                job = jobs.get(timeout=0.05)
+            except queue_mod.Empty:
+                continue
+            self.assertEqual(threading.get_ident(), owner)
+            job()
+        thread.join(timeout=1)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(seen.get("tid"), owner)
+        self.assertIn("tid=", overlay_thread_note())
+        self.assertIn("owner=", overlay_thread_note())
+
+    def test_marshal_propagates_exception(self) -> None:
+        import queue as queue_mod
+
+        from desk_pilot.desktop.overlay import call_on_overlay_thread, set_overlay_pump
+
+        jobs: queue_mod.Queue[Any] = queue_mod.Queue()
+        set_overlay_pump(jobs.put)
+        caught: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                call_on_overlay_thread(_raise_value_error)
+            except ValueError as exc:
+                caught.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        deadline = time.time() + 2
+        while thread.is_alive() and time.time() < deadline:
+            try:
+                jobs.get(timeout=0.05)()
+            except queue_mod.Empty:
+                continue
+        thread.join(timeout=1)
+        self.assertEqual(len(caught), 1)
+        self.assertEqual(str(caught[0]), "overlay boom")
+
+    def test_marshal_timeout(self) -> None:
+        from desk_pilot.desktop.overlay import call_on_overlay_thread, set_overlay_pump
+
+        set_overlay_pump(lambda _fn: None)
+        caught: list[BaseException] = []
+
+        def worker() -> None:
+            try:
+                call_on_overlay_thread(lambda: 1, timeout=0.2)
+            except TimeoutError as exc:
+                caught.append(exc)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join(timeout=2)
+        self.assertEqual(len(caught), 1)
+        self.assertIn("timed out", str(caught[0]))
+
+    def test_wrong_thread_hwnd_is_dropped(self) -> None:
+        overlay = HighlightOverlay()
+        overlay._hwnd = 99
+        overlay._hwnd_tid = threading.get_ident() + 999
+        self.assertFalse(overlay._hwnd_usable())
+        self.assertEqual(overlay._hwnd, 0)
+        self.assertIsNone(overlay._hwnd_tid)
+
+
+def _raise_value_error() -> None:
+    raise ValueError("overlay boom")
+
+
 class GuideIntentTests(unittest.TestCase):
     def test_keywords(self) -> None:
         self.assertTrue(is_guide_goal("how to open Helium and search for a dank meme"))
