@@ -13,7 +13,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "description": (
                 "Return a compact UI Automation tree for the focused window "
                 "(name, type, automation_id, bounding rect, short path). "
-                "Prefer this over screenshots."
+                "Prefer this over screenshots except on a canvas / thin browser tree "
+                "(tldraw, Figma, Paint) where UIA cannot see strokes."
             ),
             "parameters": {
                 "type": "object",
@@ -43,6 +44,63 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "x": {"type": "integer", "description": "Screen X, used when no control id/name."},
                     "y": {"type": "integer", "description": "Screen Y, used when no control id/name."},
                 },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "drag",
+            "description": (
+                "Auto mode only. Mouse-down at (x1,y1), move, mouse-up at (x2,y2). "
+                "Use this to draw on a canvas (tldraw, Figma, Paint) when list_ui has no "
+                "inkable control. Optional points=[[x,y],...] traces a polyline (rect outline "
+                "or ellipse) in one stroke. You may call several drags in one turn."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x1": {"type": "integer", "description": "Start screen X (mouse down)."},
+                    "y1": {"type": "integer", "description": "Start screen Y."},
+                    "x2": {"type": "integer", "description": "End screen X (mouse up)."},
+                    "y2": {"type": "integer", "description": "End screen Y."},
+                    "points": {
+                        "type": "array",
+                        "description": "Optional polyline [[x,y],...] for a rect or ellipse.",
+                        "items": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "minItems": 2,
+                            "maxItems": 2,
+                        },
+                    },
+                },
+                "required": ["x1", "y1", "x2", "y2"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "prepare_art",
+            "description": (
+                "Art goals only (sketch/draw/draw me a X). Create a paste-ready PNG of the "
+                "subject — OpenRouter image generation if the key supports it, otherwise a "
+                "simple geometric PNG/SVG. Copies the PNG to the clipboard when possible. "
+                "Then focus the canvas and hotkey ctrl+v. If clipboard or paste fails, use "
+                "the returned drag playbook (body rect + wheel ellipses for a car)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "subject": {
+                        "type": "string",
+                        "description": "What to draw, e.g. car.",
+                    }
+                },
+                "required": ["subject"],
                 "additionalProperties": False,
             },
         },
@@ -90,7 +148,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "screenshot_region",
             "description": (
-                "Capture a small screen region with mss. Use only when list_ui cannot find a control."
+                "Capture a small screen region with mss. Use when list_ui cannot find a control, "
+                "and freely in canvas mode (tldraw/Figma/thin browser tree)."
             ),
             "parameters": {
                 "type": "object",
@@ -263,6 +322,8 @@ GUIDE_TOOL_NAMES = frozenset({"list_ui", "list_windows", "guide_step", "done", "
 GUIDE_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     item for item in TOOL_DEFINITIONS if item["function"]["name"] in GUIDE_TOOL_NAMES
 ]
+# drag / prepare_art are never offered in guide mode and must not execute if hallucinated.
+AUTO_ONLY_TOOLS = frozenset({"drag", "prepare_art"})
 
 
 class TerminalCall:
@@ -271,7 +332,12 @@ class TerminalCall:
         self.payload = payload
 
 
-def dispatch_tool(backend: DesktopBackend, name: str, arguments: dict[str, Any]) -> dict[str, Any] | TerminalCall:
+def dispatch_tool(
+    backend: DesktopBackend,
+    name: str,
+    arguments: dict[str, Any],
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any] | TerminalCall:
     args = arguments or {}
     if name == "list_ui":
         return backend.list_ui(max_depth=int(args.get("max_depth") or 5))
@@ -283,6 +349,28 @@ def dispatch_tool(backend: DesktopBackend, name: str, arguments: dict[str, Any])
             name=_opt_str(args.get("name")),
             x=int(x) if x is not None and x != "" else None,
             y=int(y) if y is not None and y != "" else None,
+        )
+    if name == "drag":
+        try:
+            x1, y1, x2, y2 = int(args["x1"]), int(args["y1"]), int(args["x2"]), int(args["y2"])
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"ok": False, "error": f"drag needs x1,y1,x2,y2: {exc}"}
+        return backend.drag(x1, y1, x2, y2, points=args.get("points") if isinstance(args.get("points"), list) else None)
+    if name == "prepare_art":
+        from desk_pilot.agent.art import run_prepare_art, subject_from_args
+
+        subject = subject_from_args(args)
+        if not subject:
+            return {"ok": False, "error": "prepare_art requires subject."}
+        generate = None
+        llm = extra.get("llm") if extra else None
+        if llm is not None and hasattr(llm, "generate_image"):
+            generate = llm.generate_image
+        return run_prepare_art(
+            subject,
+            generate_image=generate,
+            window_rect=extra.get("window_rect") if extra else None,
+            backend=backend,
         )
     if name == "type_text":
         text = args.get("text")

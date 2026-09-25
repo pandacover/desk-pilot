@@ -15,6 +15,8 @@ class ToolDispatchTests(unittest.TestCase):
             {
                 "list_ui",
                 "click",
+                "drag",
+                "prepare_art",
                 "type_text",
                 "hotkey",
                 "screenshot_region",
@@ -34,6 +36,8 @@ class ToolDispatchTests(unittest.TestCase):
         names = {item["function"]["name"] for item in GUIDE_TOOL_DEFINITIONS}
         self.assertEqual(names, {"list_ui", "list_windows", "guide_step", "done", "fail"})
         self.assertNotIn("click", names)
+        self.assertNotIn("drag", names)
+        self.assertNotIn("prepare_art", names)
 
     def test_dispatch_list_and_hotkey(self) -> None:
         tree = dispatch_tool(self.desk, "list_ui", {})
@@ -125,6 +129,29 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertEqual(result.get("rect"), [0, 0, 1920, 1080])
         self.assertNotEqual(result.get("rect"), [-12, -12, 12, 12])
         self.assertTrue(result.get("fallback"))
+
+    def test_dispatch_drag(self) -> None:
+        result = dispatch_tool(
+            self.desk, "drag", {"x1": 100, "y1": 200, "x2": 300, "y2": 220}
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.desk.drags[0]["from"], [100, 200])
+        self.assertEqual(self.desk.drags[0]["to"], [300, 220])
+
+    def test_dispatch_drag_missing_coords(self) -> None:
+        result = dispatch_tool(self.desk, "drag", {"x1": 1})
+        self.assertFalse(result["ok"])
+
+    def test_dispatch_prepare_art_geometric(self) -> None:
+        from pathlib import Path
+
+        result = dispatch_tool(self.desk, "prepare_art", {"subject": "car"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("method"), "geometric")
+        self.assertTrue(Path(result["path"]).is_file())
+        self.assertFalse(result.get("clipboard"))
+        self.assertTrue(result.get("playbook"))
+        self.assertEqual(self.desk.clipboard_image, result["path"])
 
 
 if __name__ == "__main__":

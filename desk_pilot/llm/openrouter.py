@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from typing import Any, Protocol
 
 import httpx
@@ -97,3 +98,74 @@ class OpenRouterClient:
                 raise LLMError(str(err.get("message") or err))
             raise LLMError(str(err))
         return data
+
+    def generate_image(self, prompt: str) -> dict[str, Any]:
+        """Best-effort OpenRouter image generation. Same API key as chat.
+
+        Most chat models (including the default) do not expose /images/generations.
+        Callers must fall back to a geometric PNG when this returns ok=False.
+        """
+        if not self.api_key:
+            return {"ok": False, "error": "No OpenRouter API key."}
+        text = (prompt or "").strip()
+        if not text:
+            return {"ok": False, "error": "Image prompt is empty."}
+        body = {
+            "model": self.model,
+            "prompt": text,
+            "n": 1,
+            "size": "512x512",
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://desk-pilot.local",
+            "X-OpenRouter-Title": APP_NAME,
+        }
+        try:
+            response = self._http.post(
+                f"{OPENROUTER_BASE_URL}/images/generations",
+                headers=headers,
+                json=body,
+            )
+        except httpx.HTTPError as exc:
+            return {"ok": False, "error": f"OpenRouter image request failed: {exc}"}
+        if response.status_code >= 400:
+            return {
+                "ok": False,
+                "error": (
+                    f"OpenRouter image generation unavailable (HTTP {response.status_code}): "
+                    f"{response.text[:300]}"
+                ),
+            }
+        try:
+            data = response.json()
+        except ValueError:
+            return {"ok": False, "error": "OpenRouter image endpoint returned non-JSON."}
+        raw = _first_image_bytes(data)
+        if not raw:
+            return {
+                "ok": False,
+                "error": "OpenRouter image response had no b64/url payload. Use the drag playbook.",
+            }
+        from desk_pilot.app.config import screenshot_dir
+
+        path = screenshot_dir() / "openrouter_art.png"
+        path.write_bytes(raw)
+        return {"ok": True, "path": str(path), "method": "openrouter"}
+
+
+def _first_image_bytes(data: dict[str, Any]) -> bytes | None:
+    items = data.get("data") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        items = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        b64 = item.get("b64_json") or item.get("b64")
+        if isinstance(b64, str) and b64.strip():
+            try:
+                return base64.b64decode(b64)
+            except Exception:
+                continue
+    return None

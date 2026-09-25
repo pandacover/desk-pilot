@@ -509,6 +509,8 @@ class GuideIntentTests(unittest.TestCase):
         self.assertFalse(is_guide_goal("open Helium and search for a dank meme"))
         self.assertFalse(is_guide_goal("Open Notepad and type hello"))
         self.assertFalse(is_guide_goal("however you like, open notepad"))
+        self.assertFalse(is_guide_goal("open tldraw and sketch me a car"))
+        self.assertFalse(is_guide_goal("sketch me a car"))
 
     def test_force_toggle(self) -> None:
         self.assertTrue(is_guide_goal("open Helium", force=True))

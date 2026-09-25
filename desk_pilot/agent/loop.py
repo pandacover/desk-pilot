@@ -18,6 +18,7 @@ from desk_pilot.agent.guide import (
     snapshot_advanced,
 )
 from desk_pilot.agent.prompts import (
+    CANVAS_SYSTEM_PROMPT,
     GUIDE_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     observation_message,
@@ -30,6 +31,7 @@ from desk_pilot.agent.history import (
     trim_messages,
 )
 from desk_pilot.agent.tools import (
+    AUTO_ONLY_TOOLS,
     GUIDE_TOOL_DEFINITIONS,
     TOOL_DEFINITIONS,
     TerminalCall,
@@ -67,6 +69,9 @@ class AgentLoop:
     await_step: AwaitFn | None = None
     _messages: list[dict[str, Any]] = field(default_factory=list)
     guide_mode: bool = False
+    canvas_mode: bool = False
+    _target_title: str = ""
+    _target_process: str = ""
 
     def run(self, goal: str) -> RunResult:
         goal = (goal or "").strip()
@@ -75,28 +80,44 @@ class AgentLoop:
 
         self._goal = goal
         self.guide_mode = is_guide_goal(goal, force=self.force_guide)
+        from desk_pilot.agent.canvas import is_art_goal, should_use_canvas_mode
+
+        self.canvas_mode = (not self.guide_mode) and is_art_goal(goal)
+        self._target_title = ""
+        self._target_process = ""
         self._log("info", f"Goal: {goal}")
         if self.guide_mode:
             self._log(
                 "guide",
                 "Guide mode: sketch each step, you act. Click Continue (or F8) when done. STOP cancels.",
             )
+        elif self.canvas_mode:
+            self._log(
+                "info",
+                "Canvas mode: art goal — vision + drag (prepare_art / geometric playbook). Guide stays off.",
+            )
         if self.backend.dry_run:
             self._log("info", "Dry-run desktop: actions are simulated, not sent to the OS.")
 
         snapshot = self.backend.list_ui()
         self._last_snapshot = snapshot
-        system = GUIDE_SYSTEM_PROMPT if self.guide_mode else SYSTEM_PROMPT
+        self._remember_target(snapshot)
+        if (not self.guide_mode) and should_use_canvas_mode(goal, snapshot):
+            self._enable_canvas("thin UIA tree or art/canvas window")
+        system = self._system_prompt()
         self._messages = [
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": user_goal_message(goal, snapshot, self.backend.dry_run, guide=self.guide_mode),
+                "content": user_goal_message(
+                    goal, snapshot, self.backend.dry_run, guide=self.guide_mode, canvas=self.canvas_mode
+                ),
             },
         ]
         self._log("observe", f"Window: {self._window_label(snapshot)}")
         if snapshot.get("com_error"):
             self._log("error", snapshot.get("error") or "list_ui COM failure")
+        self._attach_canvas_screenshot(snapshot)
 
         for step in range(1, self.max_steps + 1):
             if self._stopped():
@@ -125,7 +146,12 @@ class AgentLoop:
                     if self.guide_mode
                     else (
                         "You must call a tool: list_windows, focus_window, launch_app, "
-                        "an action, wait_for_window, done, or fail."
+                        "drag, prepare_art, an action, wait_for_window, done, or fail."
+                        if self.canvas_mode
+                        else (
+                            "You must call a tool: list_windows, focus_window, launch_app, "
+                            "an action, wait_for_window, done, or fail."
+                        )
                     )
                 )
                 self._messages.append({"role": "assistant", "content": content or ""})
@@ -150,6 +176,16 @@ class AgentLoop:
                 name = str(fn.get("name") or "")
                 args = parse_arguments(fn.get("arguments"))
                 call_id = str(call.get("id") or "")
+                if self.guide_mode and name in AUTO_ONLY_TOOLS:
+                    result = {
+                        "ok": False,
+                        "guide": True,
+                        "error": f"{name} is auto-mode only. In guide mode call guide_step.",
+                    }
+                    self._messages.append(
+                        {"role": "tool", "tool_call_id": call_id, "content": compact_json(result)}
+                    )
+                    continue
                 if self.guide_mode and (name == "guide_step" or name in ACTION_TOOLS):
                     result = self._run_guide_step(name, args)
                     guided = True
@@ -163,14 +199,24 @@ class AgentLoop:
                         return RunResult("stopped", "Stopped by user.", step, self.backend.dry_run)
                     break
                 self._log("act", f"{name} {compact_json(args, 400)}")
-                result = dispatch_tool(self.backend, name, args)
+                extra = {
+                    "llm": self.llm,
+                    "window_rect": self._window_rect(),
+                }
+                result = dispatch_tool(self.backend, name, args, extra=extra)
                 if isinstance(result, TerminalCall):
                     terminal = result
                     tool_body = compact_json(result.payload)
                 else:
+                    if name not in {"list_ui", "list_windows", "focus_window", "done", "fail"}:
+                        restored = self._restore_focus_if_stolen()
+                        if restored and isinstance(result, dict):
+                            result = dict(result)
+                            result["focus_guard"] = restored
                     tool_body = compact_json(result)
                     if name == "screenshot_region" and result.get("ok") and result.get("path"):
                         screenshot_path = str(result["path"])
+                    self._remember_target_from_result(name, result)
                 self._messages.append(
                     {
                         "role": "tool",
@@ -199,17 +245,32 @@ class AgentLoop:
 
             snapshot = self.backend.list_ui()
             self._last_snapshot = snapshot
+            self._remember_target(snapshot)
+            from desk_pilot.agent.canvas import art_subject, playbook_hint, should_use_canvas_mode
+
+            if (not self.guide_mode) and should_use_canvas_mode(getattr(self, "_goal", ""), snapshot):
+                self._enable_canvas("thin UIA tree after action")
             self._log("observe", f"Window: {self._window_label(snapshot)}")
             if snapshot.get("com_error"):
                 self._log("error", snapshot.get("error") or "list_ui COM failure")
+            playbook = ""
+            if self.canvas_mode:
+                playbook = playbook_hint(art_subject(getattr(self, "_goal", "")), self._window_rect())
             self._messages.append(
                 {
                     "role": "user",
                     "content": observation_message(
-                        snapshot, step, self.max_steps, guide=self.guide_mode
+                        snapshot,
+                        step,
+                        self.max_steps,
+                        guide=self.guide_mode,
+                        canvas=self.canvas_mode,
+                        playbook=playbook,
                     ),
                 }
             )
+            if not screenshot_path:
+                self._attach_canvas_screenshot(snapshot)
             self._messages = trim_messages(sanitize_messages(self._messages))
             if guided:
                 continue
@@ -370,7 +431,7 @@ class AgentLoop:
     def _reset_history(self) -> None:
         snapshot = self._last_snapshot if isinstance(getattr(self, "_last_snapshot", None), dict) else {}
         goal = getattr(self, "_goal", "") or ""
-        system = GUIDE_SYSTEM_PROMPT if self.guide_mode else SYSTEM_PROMPT
+        system = self._system_prompt()
         extra = (
             "\n\nTool-call history was reset after an API pairing error. "
             "Continue from this UI. If the target app is already in top_windows, "
@@ -384,12 +445,112 @@ class AgentLoop:
             {"role": "system", "content": system},
             {
                 "role": "user",
-                "content": user_goal_message(goal, snapshot, self.backend.dry_run, guide=self.guide_mode)
+                "content": user_goal_message(
+                    goal, snapshot, self.backend.dry_run, guide=self.guide_mode, canvas=self.canvas_mode
+                )
                 + extra,
             },
         ]
 
-    def _maybe_image_message(self, path: str) -> dict[str, Any] | None:
+    def _system_prompt(self) -> str:
+        if self.guide_mode:
+            return GUIDE_SYSTEM_PROMPT
+        if self.canvas_mode:
+            return CANVAS_SYSTEM_PROMPT
+        return SYSTEM_PROMPT
+
+    def _enable_canvas(self, reason: str) -> None:
+        if self.guide_mode or self.canvas_mode:
+            return
+        self.canvas_mode = True
+        self._log("info", f"Canvas mode: {reason} — vision + drag.")
+        if self._messages and self._messages[0].get("role") == "system":
+            self._messages[0] = {"role": "system", "content": CANVAS_SYSTEM_PROMPT}
+
+    def _window_rect(self) -> list[int] | None:
+        from desk_pilot.agent.canvas import window_rect_from_snapshot
+
+        snap = self._last_snapshot if isinstance(getattr(self, "_last_snapshot", None), dict) else {}
+        return window_rect_from_snapshot(snap)
+
+    def _remember_target(self, snapshot: dict[str, Any] | None) -> None:
+        from desk_pilot.desktop.launch import is_agent_window
+
+        window = (snapshot or {}).get("window") if isinstance((snapshot or {}).get("window"), dict) else {}
+        name = str((window or {}).get("name") or "")
+        process = str((window or {}).get("process") or "")
+        if name and not is_agent_window(name, process):
+            self._target_title = name
+            self._target_process = process
+
+    def _remember_target_from_result(self, name: str, result: dict[str, Any] | None) -> None:
+        from desk_pilot.desktop.launch import is_agent_window
+
+        if not isinstance(result, dict) or not result.get("ok"):
+            return
+        if name not in {"focus_window", "launch_app", "wait_for_window"}:
+            return
+        title = str(result.get("window") or "")
+        process = str(result.get("process") or "")
+        if title and not is_agent_window(title, process):
+            self._target_title = title
+            if process:
+                self._target_process = process
+
+    def _restore_focus_if_stolen(self) -> dict[str, Any] | None:
+        from desk_pilot.desktop.launch import is_agent_window
+
+        if self.guide_mode:
+            return None
+        title = (self._target_title or "").strip()
+        if not title:
+            return None
+        try:
+            snap = self.backend.list_ui(max_depth=2, max_controls=24)
+        except Exception:
+            return None
+        window = snap.get("window") if isinstance(snap.get("window"), dict) else {}
+        name = str((window or {}).get("name") or "")
+        process = str((window or {}).get("process") or "")
+        if not is_agent_window(name, process):
+            self._remember_target(snap)
+            return None
+        result = self.backend.focus_window(
+            title_contains=title,
+            process_contains=self._target_process or None,
+        )
+        self._log("act", f"focus guard: Desk Pilot had focus; restored {title!r}")
+        return result if isinstance(result, dict) else {"ok": bool(result), "window": title}
+
+    def _attach_canvas_screenshot(self, snapshot: dict[str, Any] | None) -> None:
+        from desk_pilot.agent.canvas import is_browser_or_whiteboard, window_rect_from_snapshot
+
+        if self.guide_mode or not self.canvas_mode:
+            return
+        if not snapshot:
+            return
+        if not is_browser_or_whiteboard(snapshot):
+            return
+        box = window_rect_from_snapshot(snapshot)
+        if not box:
+            return
+        left, top, right, bottom = box
+        width, height = max(1, right - left), max(1, bottom - top)
+        try:
+            captured = self.backend.screenshot_region(left, top, width, height)
+        except Exception as exc:  # noqa: BLE001
+            self._log("error", f"canvas screenshot failed: {exc}")
+            return
+        if not (captured.get("ok") and captured.get("path")):
+            return
+        image_msg = self._maybe_image_message(
+            str(captured["path"]),
+            caption="Canvas screenshot attached. UIA is thin; plan drag strokes from this image.",
+        )
+        if image_msg:
+            self._messages.append(image_msg)
+
+    def _maybe_image_message(self, path: str, caption: str | None = None) -> dict[str, Any] | None:
         file = Path(path)
         if not file.is_file():
             return None
@@ -397,6 +558,7 @@ class AgentLoop:
             raw = file.read_bytes()
         except OSError:
             return None
+        label = caption or f"Region screenshot attached ({file.name})."
         if len(raw) > 1_200_000:
             return {
                 "role": "user",
@@ -406,7 +568,7 @@ class AgentLoop:
         return {
             "role": "user",
             "content": [
-                {"type": "text", "text": f"Region screenshot attached ({file.name})."},
+                {"type": "text", "text": label},
                 {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
             ],
         }

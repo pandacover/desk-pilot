@@ -59,6 +59,17 @@ class DesktopBackend(ABC):
         """Click a control by automation id, name, or screen coordinates."""
 
     @abstractmethod
+    def drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        points: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        """Mouse-down at (x1,y1), move, mouse-up at (x2,y2). Optional polyline points."""
+
+    @abstractmethod
     def type_text(
         self,
         text: str,

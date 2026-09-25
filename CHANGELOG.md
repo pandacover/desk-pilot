@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.0-rc
+
+- **Drag tool** (auto mode only): mouse-down `(x1,y1)` → move → up `(x2,y2)`, optional polyline `points` for rects and ellipses. Windows uses pynput; the dry-run mock records strokes. Not offered in Guide mode.
+- **Canvas / thin-tree mode**: goals like sketch/draw/paint/tldraw/Figma, or a browser/whiteboard whose `list_ui` is chrome-only (~10 controls), switch the system prompt to vision + drag. The loop attaches a window screenshot after each observation on that surface. Several `drag` calls in one model turn run in order before the next snapshot (short stroke sequences, not twenty blind clicks).
+- **Focus guard**: if an action leaves Desk Pilot focused, `focus_window` restores the previous target before the next plan.
+- **Art goals**: `prepare_art` tries OpenRouter `/images/generations` with the same API key, then falls back to a geometric PNG + SVG. Clipboard PNG paste is Windows CF_DIB; off Windows it fails clearly and the car playbook (body rect, cabin, two wheel ellipses) is the path that works. “Sketch me a car” does **not** enable Guide mode.
+
 ## 0.1.9
 
 - Guide sketches that sometimes painted and sometimes failed with `UpdateLayeredWindow` `GetLastError=1400` now recreate the overlay HWND on the UI thread and retry the blit once. A failed blit never leaves a stale handle on the singleton. The live log records `hwnd recreated` on the successful retry, or `hwnd recreated, still failed` if the second blit also dies.
