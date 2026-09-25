@@ -15,7 +15,7 @@ On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fak
 
 ```powershell
 python -m venv .venv
-.\ .venv\Scripts\activate
+.\.venv\Scripts\activate
 pip install -r requirements.txt
 python -m desk_pilot
 ```
