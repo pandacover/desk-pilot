@@ -22,10 +22,18 @@ class ToolDispatchTests(unittest.TestCase):
                 "focus_window",
                 "launch_app",
                 "wait_for_window",
+                "guide_step",
                 "done",
                 "fail",
             },
         )
+
+    def test_guide_tool_subset(self) -> None:
+        from desk_pilot.agent.tools import GUIDE_TOOL_DEFINITIONS
+
+        names = {item["function"]["name"] for item in GUIDE_TOOL_DEFINITIONS}
+        self.assertEqual(names, {"list_ui", "list_windows", "guide_step", "done", "fail"})
+        self.assertNotIn("click", names)
 
     def test_dispatch_list_and_hotkey(self) -> None:
         tree = dispatch_tool(self.desk, "list_ui", {})

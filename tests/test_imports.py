@@ -31,6 +31,9 @@ class ImportSmokeTests(unittest.TestCase):
 
         self.assertTrue(callable(sketch.render_sketch))
         self.assertTrue(callable(overlay.get_overlay))
+        from desk_pilot.agent.guide import is_guide_goal
+
+        self.assertFalse(is_guide_goal("open notepad"))
 
 
 if __name__ == "__main__":

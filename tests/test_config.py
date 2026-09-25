@@ -16,14 +16,14 @@ class ConfigTests(unittest.TestCase):
                 model="openai/gpt-6-luna",
                 max_steps=12,
                 reasoning_effort="low",
-                highlight_overlay=False,
+                guide_mode=True,
             )
             save_settings(original, path)
             loaded = load_settings(path)
             self.assertEqual(loaded.openrouter_api_key, "sk-or-v1-test-secret")
             self.assertEqual(loaded.model, "openai/gpt-6-luna")
             self.assertEqual(loaded.max_steps, 12)
-            self.assertFalse(loaded.highlight_overlay)
+            self.assertTrue(loaded.guide_mode)
             raw = path.read_text(encoding="utf-8")
             self.assertIn("openrouter_api_key", json.loads(raw))
 
@@ -53,14 +53,14 @@ class ConfigTests(unittest.TestCase):
             loaded = load_settings(path)
             self.assertEqual(loaded.openrouter_api_key, "")
             self.assertEqual(loaded.model, "openai/gpt-6-luna")
-            self.assertTrue(loaded.highlight_overlay)
+            self.assertFalse(loaded.guide_mode)
 
-    def test_missing_overlay_key_defaults_on(self) -> None:
+    def test_missing_guide_mode_defaults_off(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.json"
             path.write_text('{"openrouter_api_key":"","model":"openai/gpt-6-luna","max_steps":30}\n', encoding="utf-8")
             loaded = load_settings(path)
-            self.assertTrue(loaded.highlight_overlay)
+            self.assertFalse(loaded.guide_mode)
 
 
 if __name__ == "__main__":

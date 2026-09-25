@@ -49,6 +49,7 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("hello", result.message.lower() + desk.edit_text)
         self.assertEqual(desk.edit_text, "hello")
         self.assertTrue(any(k == "done" for k, _ in logs))
+        self.assertEqual(desk.highlights, [])
 
     def test_empty_goal_fails_fast(self) -> None:
         result = AgentLoop(backend=MockDesktop(), llm=ScriptedLLM([]), max_steps=3).run("  ")

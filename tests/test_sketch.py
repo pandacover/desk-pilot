@@ -1,5 +1,10 @@
+import threading
+import time
 import unittest
+from typing import Any
 
+from desk_pilot.agent.guide import is_guide_goal, snapshot_advanced
+from desk_pilot.agent.loop import AgentLoop
 from desk_pilot.desktop.mock import MockDesktop
 from desk_pilot.desktop.overlay import HighlightOverlay, get_overlay
 from desk_pilot.desktop.sketch import (
@@ -44,30 +49,198 @@ class SketchPathTests(unittest.TestCase):
         self.assertGreater(alpha_max, 0)
 
 
-class OverlayToggleTests(unittest.TestCase):
-    def test_disabled_does_not_record(self) -> None:
-        desk = MockDesktop()
-        desk.highlight_overlay = False
-        desk.click(name="Start")
-        desk.type_text("hello")
-        desk.click(x=10, y=20)
-        self.assertEqual(desk.highlights, [])
-
-    def test_enabled_records_control_rect(self) -> None:
-        desk = MockDesktop()
-        self.assertTrue(desk.highlight_overlay)
-        desk.click(name="Start")
-        self.assertEqual(len(desk.highlights), 1)
-        left, top, right, bottom = desk.highlights[0]
-        self.assertLess(left, right)
-        self.assertLess(top, bottom)
-
-    def test_linux_overlay_flash_is_noop(self) -> None:
+class OverlayNoopTests(unittest.TestCase):
+    def test_linux_overlay_is_noop(self) -> None:
         overlay = HighlightOverlay()
+        self.assertFalse(overlay.show([10, 10, 80, 40]))
         overlay.flash([10, 10, 80, 40], duration=1.0)
         overlay.hide()
         overlay.close()
         get_overlay().flash(None)
+
+
+class GuideIntentTests(unittest.TestCase):
+    def test_keywords(self) -> None:
+        self.assertTrue(is_guide_goal("how to open Helium and search for a dank meme"))
+        self.assertTrue(is_guide_goal("Show me how to use Notepad"))
+        self.assertTrue(is_guide_goal("Guide me through opening Chrome"))
+        self.assertTrue(is_guide_goal("Teach me to search Google"))
+        self.assertTrue(is_guide_goal("Walk me through Start menu"))
+        self.assertTrue(is_guide_goal("How do I open Helium?"))
+        self.assertFalse(is_guide_goal("open Helium and search for a dank meme"))
+        self.assertFalse(is_guide_goal("Open Notepad and type hello"))
+        self.assertFalse(is_guide_goal("however you like, open notepad"))
+
+    def test_force_toggle(self) -> None:
+        self.assertTrue(is_guide_goal("open Helium", force=True))
+        self.assertFalse(is_guide_goal("", force=False))
+
+
+class ScriptedLLM:
+    def __init__(self, script: list[dict[str, Any]]) -> None:
+        self.script = list(script)
+        self.calls = 0
+        self.tool_names: list[str] = []
+
+    def complete(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]) -> dict[str, Any]:
+        self.calls += 1
+        self.tool_names = [item["function"]["name"] for item in tools]
+        if not self.script:
+            raise AssertionError("LLM script exhausted")
+        return self.script.pop(0)
+
+
+def _call(name: str, arguments: str, call_id: str = "c1") -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+class GuideLoopTests(unittest.TestCase):
+    def test_auto_path_never_sketches(self) -> None:
+        from tests.test_loop import ScriptedLLM as LoopLLM, _call as loop_call
+
+        llm = LoopLLM(
+            [
+                {"content": "", "tool_calls": [loop_call("launch_app", '{"name":"notepad"}', "1")]},
+                {"content": "", "tool_calls": [loop_call("done", '{"result":"opened"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        result = AgentLoop(backend=desk, llm=llm, max_steps=5).run("Open Notepad")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(desk.highlights, [])
+        self.assertIsNone(desk.highlight_visible)
+        self.assertTrue(any(a.startswith("launch_app") for a in desk.actions))
+
+    def test_guide_sketches_and_does_not_click(self) -> None:
+        waits: list[str] = []
+
+        def await_step() -> str:
+            waits.append("wait")
+            return "continue"
+
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [
+                        _call(
+                            "guide_step",
+                            '{"instruction":"Click Start","name":"Start"}',
+                            "1",
+                        )
+                    ],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"You opened Start"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        result = AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=6,
+            force_guide=True,
+            await_step=await_step,
+        ).run("how to open Start")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(waits, ["wait"])
+        self.assertEqual(len(desk.highlights), 1)
+        self.assertFalse(any(a.startswith("click") for a in desk.actions))
+        self.assertIn("guide_step", llm.tool_names)
+        self.assertNotIn("click", llm.tool_names)
+        left, top, right, bottom = desk.highlights[0]
+        self.assertLess(left, right)
+
+    def test_how_to_goal_enables_guide_without_toggle(self) -> None:
+        llm = ScriptedLLM(
+            [{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]
+        )
+        loop = AgentLoop(backend=MockDesktop(), llm=llm, max_steps=3, await_step=lambda: "continue")
+        result = loop.run("how to open Helium and search for a dank meme")
+        self.assertTrue(loop.guide_mode)
+        self.assertEqual(result.status, "done")
+
+    def test_intercepted_click_does_not_act(self) -> None:
+        llm = ScriptedLLM(
+            [
+                {"content": "", "tool_calls": [_call("click", '{"name":"Start"}', "1")]},
+                {"content": "", "tool_calls": [_call("done", '{"result":"guided"}', "2")]},
+            ]
+        )
+        desk = MockDesktop()
+        AgentLoop(
+            backend=desk,
+            llm=llm,
+            max_steps=5,
+            force_guide=True,
+            await_step=lambda: "continue",
+        ).run("teach me the Start menu")
+        self.assertFalse(any(a.startswith("click") for a in desk.actions))
+        self.assertEqual(desk.window_title, "Desktop")
+        self.assertEqual(len(desk.highlights), 1)
+
+    def test_continue_event_unblocks(self) -> None:
+        event = threading.Event()
+
+        def later() -> None:
+            time.sleep(0.05)
+            event.set()
+
+        threading.Thread(target=later, daemon=True).start()
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [_call("guide_step", '{"instruction":"Click Start","name":"Start"}', "1")],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"unblocked"}', "2")]},
+            ]
+        )
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=5,
+            force_guide=True,
+            continue_event=event,
+        ).run("guide me")
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.message, "unblocked")
+
+    def test_stop_during_wait(self) -> None:
+        stop = threading.Event()
+        cont = threading.Event()
+
+        def later() -> None:
+            time.sleep(0.05)
+            stop.set()
+
+        threading.Thread(target=later, daemon=True).start()
+        llm = ScriptedLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [_call("guide_step", '{"instruction":"Click Start","name":"Start"}', "1")],
+                }
+            ]
+        )
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=4,
+            force_guide=True,
+            stop_event=stop,
+            continue_event=cont,
+        ).run("how to click Start")
+        self.assertEqual(result.status, "stopped")
+
+    def test_snapshot_advanced(self) -> None:
+        before = {"window": {"name": "Desktop"}}
+        after = {"window": {"name": "Untitled - Notepad"}}
+        self.assertTrue(snapshot_advanced(before, after, {"title_contains": "Notepad"}))
+        self.assertFalse(snapshot_advanced(before, before, {"title_contains": "Notepad"}))
 
 
 if __name__ == "__main__":
