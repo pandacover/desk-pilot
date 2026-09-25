@@ -39,6 +39,8 @@ class MockDesktop(DesktopBackend):
         self.window_title = "Desktop"
         self._missing_name = "app"
         self._open_apps: dict[str, dict[str, str]] = {}
+        self.highlight_overlay = True
+        self.highlights: list[list[int]] = []
 
     def reset(self) -> None:
         self.__init__()
@@ -74,6 +76,7 @@ class MockDesktop(DesktopBackend):
         label = (name or automation_id or f"{x},{y}").strip()
         self.actions.append(f"click {label}")
         if target:
+            self.flash_highlight(target.get("rect"))
             aid = (target.get("automation_id") or "").lower()
             n = (target.get("name") or "").lower()
             if aid in {"start", "startbutton"} or n in {"start", "start menu"}:
@@ -90,6 +93,7 @@ class MockDesktop(DesktopBackend):
                     self._open_notepad()
             return {"ok": True, "dry_run": True, "clicked": target, "window": self.window_title}
         if x is not None and y is not None:
+            self.flash_highlight([int(x) - 10, int(y) - 10, int(x) + 10, int(y) + 10])
             return {"ok": True, "dry_run": True, "clicked": {"x": x, "y": y}, "note": "coordinate click (simulated)"}
         return {"ok": False, "dry_run": True, "error": "No matching control. Use list_ui names/ids or coordinates."}
 
@@ -101,6 +105,8 @@ class MockDesktop(DesktopBackend):
         clear: bool = False,
     ) -> dict[str, Any]:
         self.actions.append(f"type {text!r}")
+        _, focused, _ = self._scene_tree()
+        self.flash_highlight(focused.get("rect") if isinstance(focused, dict) else None)
         if self.scene == "run":
             self.run_text = "" if clear else self.run_text
             self.run_text += text
@@ -279,6 +285,13 @@ class MockDesktop(DesktopBackend):
             }
         self._focus_app(existing)
         return {"ok": True, "dry_run": True, "window": self.window_title, "method": "focus"}
+
+    def flash_highlight(self, rect: list[int] | tuple[int, ...] | None, duration: float | None = None) -> None:
+        if not self.highlight_overlay:
+            return
+        if not rect or len(rect) < 4:
+            return
+        self.highlights.append([int(v) for v in list(rect)[:4]])
 
     def _open_notepad(self) -> None:
         self.scene = "notepad"
