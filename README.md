@@ -15,7 +15,7 @@ On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fak
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\activate
+.\ .venv\Scripts\activate
 pip install -r requirements.txt
 python -m desk_pilot
 ```
@@ -97,6 +97,18 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 ```
 observe → plan one human step → sketch → you act → Continue → next step → done
 ```
+
+## Pull latest (0.1.8)
+
+Fixes guide-mode sketches after Test sketch works: `SKETCH failed: UpdateLayeredWindow failed (GetLastError=1400 Invalid window handle.)`. Overlay create/blit/hide now run on the UI thread. How-to steps should show the same yellow desktop outline as Test sketch.
+
+```powershell
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Then **Test sketch** (still works), then retry the how-to goal. You should see `SKETCH [real coords]` and the yellow outline on the desktop while Continue waits — not error 1400.
 
 ## Pull latest (0.1.7)
 

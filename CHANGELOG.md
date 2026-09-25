@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.8
+
+- Guide sketches were failing with `UpdateLayeredWindow` `GetLastError=1400` (invalid window handle) after Test sketch worked. The overlay HWND is now owned by the Tk UI thread; `show`/`hide`/`close` from the agent worker are marshaled onto that thread. A HWND created on another thread is never blit from the worker.
+
 ## 0.1.7
 
 - Do not sketch the (0,0) ±12 placeholder (`[-12,-12,12,12]`). `find_control_rect` rejects origin coordinates; overlay/guide log `SKETCH skipped` with a reason instead of painting a corner box. Switching to an already-open Chrome/Helium/ChatGPT window uses `list_windows` title match and sketches that window's bounds.
