@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from desk_pilot.desktop.rects import SKIP_NO_RECT
+
 _GUIDE_PATTERNS = (
     r"\bhow to\b",
     r"\bhow do i\b",
@@ -16,7 +18,7 @@ _GUIDE_PATTERNS = (
     r"\bwalkthrough\b",
 )
 
-_GUIDE_RE = re.compile("|".join(_GUIDE_PATTERNS), re.IGNORECASE)
+_GUIDE_RE = re.compile("|" .join(_GUIDE_PATTERNS), re.IGNORECASE)
 
 ACTION_TOOLS = frozenset(
     {"click", "type_text", "hotkey", "launch_app", "focus_window", "wait_for_window", "screenshot_region"}
@@ -81,6 +83,85 @@ def expected_from_args(name: str, args: dict[str, Any] | None) -> dict[str, str]
     if title:
         return {"title_contains": title}
     return {}
+
+
+FALLBACK_WINDOW_NOTE = (
+    "The whole window is highlighted as a fallback — the named control was not found."
+)
+RETRY_NEED_TARGET = (
+    "guide_step needs automation_id, name, or x,y from the latest list_ui so the sketch "
+    "can outline a control. Instruction-only is not enough; retry with a target."
+)
+
+
+def guide_has_locator(args: dict[str, Any] | None) -> bool:
+    """True when the model passed a control id, visible name, or x,y."""
+    args = args or {}
+    if str(args.get("automation_id") or "").strip():
+        return True
+    if str(args.get("name") or "").strip():
+        return True
+    x, y = args.get("x"), args.get("y")
+    return x is not None and x != "" and y is not None and y != ""
+
+
+def _opt_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_guide_rect(backend: Any, args: dict[str, Any] | None, *, tool_name: str = "guide_step") -> dict[str, Any]:
+    """Locate a sketch rect: control / xy, then named window, then focused window."""
+    from desk_pilot.desktop.rects import as_rect
+
+    args = args or {}
+    aid = str(args.get("automation_id") or "").strip() or None
+    nam = str(args.get("name") or "").strip() or None
+    if tool_name == "launch_app":
+        nam = None
+    x = _opt_int(args.get("x"))
+    y = _opt_int(args.get("y"))
+    title = (
+        str(
+            args.get("expected_title")
+            or args.get("title_contains")
+            or args.get("process_contains")
+            or ""
+        ).strip()
+        or None
+    )
+    if tool_name == "launch_app":
+        title = title or str(args.get("name") or "").strip() or None
+    if tool_name == "focus_window":
+        title = title or str(args.get("title_contains") or args.get("process_contains") or "").strip() or None
+
+    has_control_query = bool(aid or nam or (x is not None and y is not None))
+    box = None
+    if has_control_query:
+        box = as_rect(backend.find_control_rect(automation_id=aid, name=nam, x=x, y=y))
+    if box:
+        source = "xy" if (x is not None and y is not None and not aid and not nam) else "control"
+        return {"rect": box, "source": source, "fallback": False}
+
+    if title:
+        try:
+            titled = as_rect(backend.window_rect_by_title(title))
+        except Exception:
+            titled = None
+        if titled:
+            return {"rect": titled, "source": "window", "fallback": True, "title": title}
+
+    try:
+        focused = as_rect(backend.focused_window_rect())
+    except Exception:
+        focused = None
+    if focused:
+        return {"rect": focused, "source": "window", "fallback": True}
+    return {"rect": None, "source": "none", "fallback": False, "error": SKIP_NO_RECT}
 
 
 def snapshot_advanced(before: dict[str, Any] | None, after: dict[str, Any] | None, expected: dict[str, str] | None) -> bool:

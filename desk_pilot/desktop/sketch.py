@@ -8,20 +8,33 @@ from typing import Sequence
 
 from PIL import Image, ImageDraw
 
+from desk_pilot.desktop.rects import SKIP_NO_RECT, TEST_SKETCH_RECT, TEST_SKETCH_SECONDS, as_rect
+
 PAD = 18
 MIN_SIZE = 12
 DEFAULT_AMPLITUDE = 4.5
 
+__all__ = [
+    "PAD",
+    "MIN_SIZE",
+    "DEFAULT_AMPLITUDE",
+    "SKIP_NO_RECT",
+    "TEST_SKETCH_RECT",
+    "TEST_SKETCH_SECONDS",
+    "as_rect",
+    "normalize_rect",
+    "expand_tiny_rect",
+    "sketch_polyline",
+    "render_sketch",
+    "distance_to_rect_border",
+]
+
 
 def normalize_rect(rect: Sequence[float] | None) -> tuple[int, int, int, int]:
-    if not rect or len(rect) < 4:
+    box = as_rect(rect)
+    if not box:
         return (0, 0, 0, 0)
-    left, top, right, bottom = (int(round(float(v))) for v in rect[:4])
-    if right < left:
-        left, right = right, left
-    if bottom < top:
-        top, bottom = bottom, top
-    return left, top, right, bottom
+    return box[0], box[1], box[2], box[3]
 
 
 def expand_tiny_rect(left: int, top: int, right: int, bottom: int, *, min_size: int = MIN_SIZE) -> tuple[int, int, int, int]:
