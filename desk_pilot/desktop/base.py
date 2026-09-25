@@ -8,6 +8,11 @@ class DesktopBackend(ABC):
     """UIA-first desktop control. Mock impl is used off Windows."""
 
     dry_run: bool = False
+    highlight_overlay: bool = True
+
+    def flash_highlight(self, rect: list[int] | tuple[int, ...] | None, duration: float | None = None) -> None:
+        """Briefly sketch a UIA bounding rect. No-op when disabled or off Windows."""
+        return
 
     @abstractmethod
     def list_ui(self, max_depth: int = 5, max_controls: int = 70) -> dict[str, Any]:
