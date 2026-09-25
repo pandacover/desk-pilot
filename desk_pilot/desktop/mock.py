@@ -38,6 +38,7 @@ class MockDesktop(DesktopBackend):
         self.actions: list[str] = []
         self.window_title = "Desktop"
         self._missing_name = "app"
+        self._open_apps: dict[str, dict[str, str]] = {}
 
     def reset(self) -> None:
         self.__init__()
@@ -54,7 +55,8 @@ class MockDesktop(DesktopBackend):
             "window": window,
             "focused": focused,
             "controls": visible,
-            "hint": "Dry-run backend. No real mouse/keyboard. Prefer launch_app; Win+R then notepad+Enter still opens fake Notepad.",
+            "hint": "Dry-run backend. Prefer focus_window when the app is already in top_windows.",
+            "top_windows": self._top_window_summaries(),
         }
         if launch_error:
             payload["launch_error"] = launch_error
@@ -81,7 +83,11 @@ class MockDesktop(DesktopBackend):
                 self.scene = "desktop"
                 self.window_title = "Desktop"
             elif n in {"notepad"} or aid == "notepad_tile":
-                self._open_notepad()
+                existing = self._open_apps.get("notepad")
+                if existing:
+                    self._focus_app(existing)
+                else:
+                    self._open_notepad()
             return {"ok": True, "dry_run": True, "clicked": target, "window": self.window_title}
         if x is not None and y is not None:
             return {"ok": True, "dry_run": True, "clicked": {"x": x, "y": y}, "note": "coordinate click (simulated)"}
@@ -147,6 +153,7 @@ class MockDesktop(DesktopBackend):
                 self._open_notepad()
                 return {"ok": True, "dry_run": True, "keys": chord, "window": "Untitled - Notepad"}
         if chord in {"alt+f4", "alt+f4"}:
+            self._close_current_app()
             self.scene = "desktop"
             self.window_title = "Desktop"
         if chord in {"ctrl+a"}:
@@ -211,6 +218,17 @@ class MockDesktop(DesktopBackend):
     def launch_app(self, name: str) -> dict[str, Any]:
         query = (name or "").strip()
         self.actions.append(f"launch_app {query!r}")
+        existing = self._match_open_app(query)
+        if existing:
+            self._focus_app(existing)
+            return {
+                "ok": True,
+                "dry_run": True,
+                "reused": True,
+                "method": "existing_window",
+                "window": self.window_title,
+                "hint": "An instance was already open; focused it instead of launching another.",
+            }
         key = query.lower().replace(".exe", "")
         if "notepad" in key:
             self._open_notepad()
@@ -233,10 +251,78 @@ class MockDesktop(DesktopBackend):
             "hint": "Dismiss the dialog, then try Start search or another name. Dry-run catalog includes notepad.",
         }
 
+    def list_windows(self) -> dict[str, Any]:
+        windows = self._top_window_summaries()
+        return {
+            "ok": True,
+            "dry_run": True,
+            "windows": windows,
+            "hint": "If the target app is listed, call focus_window instead of launch_app.",
+        }
+
+    def focus_window(
+        self,
+        title_contains: str | None = None,
+        process_contains: str | None = None,
+    ) -> dict[str, Any]:
+        query = (title_contains or process_contains or "").strip()
+        self.actions.append(f"focus_window {query!r}")
+        if not query:
+            return {"ok": False, "dry_run": True, "error": "focus_window needs title_contains or process_contains."}
+        existing = self._match_open_app(query)
+        if not existing:
+            return {
+                "ok": False,
+                "dry_run": True,
+                "error": f"No open window matching {query!r}.",
+                "windows": self._top_window_summaries(),
+            }
+        self._focus_app(existing)
+        return {"ok": True, "dry_run": True, "window": self.window_title, "method": "focus"}
+
     def _open_notepad(self) -> None:
         self.scene = "notepad"
         self.edit_text = ""
         self.window_title = "Untitled - Notepad"
+        self._upsert_app("notepad", self.window_title, "notepad")
+
+    def _upsert_app(self, process: str, title: str, scene: str) -> None:
+        self._open_apps[process] = {"name": title, "process": process, "scene": scene}
+
+    def _close_current_app(self) -> None:
+        if self.scene == "notepad":
+            self._open_apps.pop("notepad", None)
+
+    def _match_open_app(self, query: str) -> dict[str, str] | None:
+        from desk_pilot.desktop.launch import window_match_score
+
+        best: tuple[int, dict[str, str]] | None = None
+        for app in self._open_apps.values():
+            score = window_match_score(query, title=app.get("name") or "", process=app.get("process") or "")
+            if score < 55:
+                continue
+            if best is None or score > best[0]:
+                best = (score, app)
+        return None if best is None else best[1]
+
+    def _focus_app(self, app: dict[str, str]) -> None:
+        self.scene = app.get("scene") or "desktop"
+        self.window_title = app.get("name") or self.window_title
+
+    def _top_window_summaries(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = [
+            {
+                "name": self.window_title,
+                "process": "notepad" if self.scene == "notepad" else "explorer",
+                "focused": True,
+            }
+        ]
+        seen = {self.window_title.lower()}
+        for app in self._open_apps.values():
+            if (app.get("name") or "").lower() in seen:
+                continue
+            items.append({"name": app.get("name") or "", "process": app.get("process") or "", "focused": False})
+        return items
 
     def _open_run_not_found(self, typed: str) -> None:
         self._missing_name = (typed or "app").strip() or "app"
