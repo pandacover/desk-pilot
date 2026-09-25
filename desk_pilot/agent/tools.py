@@ -184,6 +184,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "guide_step",
             "description": (
                 "Guide mode only: highlight one control and tell the human what to do. "
+                "You MUST pass automation_id or visible name (or x and y) copied from the "
+                "latest list_ui. Instruction-only calls are rejected and must be retried. "
                 "Do not click or type. One step per turn."
             ),
             "parameters": {
@@ -193,10 +195,19 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "Short instruction, e.g. Click the address bar.",
                     },
-                    "automation_id": {"type": "string"},
-                    "name": {"type": "string", "description": "Visible Name of the control to sketch."},
-                    "x": {"type": "integer"},
-                    "y": {"type": "integer"},
+                    "automation_id": {
+                        "type": "string",
+                        "description": "UIA AutomationId from the latest list_ui. Required unless name or x,y is set.",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Visible Name from list_ui. Case-insensitive; a contains match is used "
+                            "if the exact name is missing."
+                        ),
+                    },
+                    "x": {"type": "integer", "description": "Screen X when no control id/name."},
+                    "y": {"type": "integer", "description": "Screen Y when no control id/name."},
                     "expected_title": {
                         "type": "string",
                         "description": "If the window title will contain this after the user acts, auto-advance may fire.",
@@ -347,20 +358,35 @@ def _opt_str(value: Any) -> str | None:
 
 
 def _guide_step_payload(backend: DesktopBackend, args: dict[str, Any]) -> dict[str, Any]:
-    from desk_pilot.agent.guide import instruction_for_tool
-
-    x = args.get("x")
-    y = args.get("y")
-    rect = backend.find_control_rect(
-        automation_id=_opt_str(args.get("automation_id")),
-        name=_opt_str(args.get("name")),
-        x=int(x) if x is not None and x != "" else None,
-        y=int(y) if y is not None and y != "" else None,
+    from desk_pilot.agent.guide import (
+        FALLBACK_WINDOW_NOTE,
+        RETRY_NEED_TARGET,
+        guide_has_locator,
+        instruction_for_tool,
+        resolve_guide_rect,
     )
+
+    instruction = instruction_for_tool("guide_step", args)
+    if not guide_has_locator(args):
+        return {
+            "ok": False,
+            "guide": True,
+            "instruction": instruction,
+            "rect": None,
+            "skip": True,
+            "error": RETRY_NEED_TARGET,
+        }
+    resolved = resolve_guide_rect(backend, args, tool_name="guide_step")
+    rect = resolved.get("rect")
+    if resolved.get("fallback") and rect:
+        instruction = f"{instruction} {FALLBACK_WINDOW_NOTE}".strip()
     return {
         "ok": True,
         "guide": True,
-        "instruction": instruction_for_tool("guide_step", args),
+        "instruction": instruction,
         "rect": rect,
+        "source": resolved.get("source"),
+        "fallback": bool(resolved.get("fallback")),
         "expected_title": _opt_str(args.get("expected_title")),
+        "error": resolved.get("error"),
     }
