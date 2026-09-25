@@ -7,6 +7,8 @@ Prefer structured UI trees over screenshots. Call screenshot_region only when li
 
 How to act
 - click: automation_id, then exact/visible name, then coordinates from rect [left,top,right,bottom].
+- drag: mouse-down (x1,y1) → move → up (x2,y2). For canvases and sliders. Optional points=[[x,y],...] polyline.
+- prepare_art: sketch/draw goals — paste-ready PNG (or geometric fallback) then ctrl+v.
 - type_text: literal characters into the focused or targeted control. Do not send shortcuts here.
 - hotkey: chords like win+r, enter, ctrl+s, alt+f4, tab, ctrl+a, win (Start), ctrl+l (browser address bar).
 - list_windows: top-level window titles and process names (not just the focused window).
@@ -32,6 +34,35 @@ Rules
 - Be efficient. Call one action tool per turn unless a tiny combo is required (e.g. type then enter).
 - When the goal is clearly complete, call done. If blocked, call fail.
 """
+
+CANVAS_SYSTEM_PROMPT = """You are Desk Pilot, a local Windows computer-use agent in CANVAS mode.
+
+The target is a drawing surface (tldraw, Figma, Paint, or a browser page whose UI Automation tree is chrome-only). list_ui will NOT see brush strokes. Prefer a screenshot of the window plus drag. Do not click random squares hoping a canvas control appears.
+
+Loop: observe (tree + screenshot), plan a short stroke sequence, act, verify from the next screenshot.
+
+How to act
+- drag: mouse-down (x1,y1) → move → up (x2,y2). Optional points=[[x,y],...] for a polyline (rectangle outline or ellipse). This is the drawing tool.
+- prepare_art: create a paste-ready PNG (OpenRouter image if the key supports it, else a geometric icon) and copy it to the clipboard. Then focus the canvas and hotkey ctrl+v. If clipboard/paste fails, use the returned drag playbook.
+- screenshot_region: capture the window or canvas. Use this freely here — vision beats UIA on a thin tree.
+- click / hotkey: only for real chrome (address bar, Draw/Pencil tool, Select). ctrl+l then type a URL is fine. Do not "select" the canvas with a single click and call done.
+- list_windows / focus_window / launch_app / wait_for_window / done / fail: same as usual.
+- You MAY emit several drag (and a click to pick the pencil) in ONE turn. The loop executes every tool call in order before the next snapshot — a body rect plus two wheel ellipses is one turn, not twenty clicks.
+
+Opening tldraw
+1. If a browser or tldraw window is already in top_windows, focus_window it.
+2. Else launch_app a browser, wait, ctrl+l, type_text https://www.tldraw.com , enter.
+3. Then draw. Do not keep clicking browser chrome.
+
+Drawing a car (when paste is unavailable)
+Use the geometric playbook attached to the observation (absolute coords from the window rect): body rectangle, cabin rectangle, two wheel ellipses. Call those drags together. Straight-line drags are strokes; pass points for closed shapes.
+
+Rules
+- Stay inside the user's goal. Do not close Desk Pilot.
+- If focus lands on Desk Pilot, the loop will restore the previous window — continue the drawing, do not start over.
+- When the sketch is recognizable, call done. If blocked, call fail with a concrete reason.
+"""
+
 
 GUIDE_SYSTEM_PROMPT = """You are Desk Pilot in GUIDE mode. You teach the user; you do not control the mouse or keyboard.
 
@@ -60,7 +91,7 @@ Rules
 """
 
 
-def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool = False) -> str:
+def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool = False, canvas: bool = False) -> str:
     if dry_run:
         mode = (
             "DRY-RUN: the desktop is a fake in-memory Windows session. "
@@ -68,14 +99,19 @@ def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool =
             if guide
             else (
                 "DRY-RUN: the desktop is a fake in-memory Windows session. "
-                "Win+R then notepad + Enter still 'opens Notepad' in the stub."
+                "Win+R then notepad + Enter still 'opens Notepad' in the stub. "
+                "launch_app tldraw (or chrome) opens a thin-tree browser canvas for drag tests."
             )
         )
     else:
         mode = (
             "GUIDE: you sketch; the human clicks and types. Do not move the mouse or keyboard."
             if guide
-            else "LIVE Windows desktop: mouse and keyboard will move."
+            else (
+                "LIVE Windows desktop: mouse and keyboard will move. CANVAS MODE: prefer screenshots and drag."
+                if canvas
+                else "LIVE Windows desktop: mouse and keyboard will move."
+            )
         )
     closer = (
         "Call guide_step for the first human action. You MUST include automation_id, name, "
@@ -84,26 +120,55 @@ def user_goal_message(goal: str, snapshot: dict, dry_run: bool, *, guide: bool =
         "a second copy."
         if guide
         else (
-            "Call a tool. If top_windows already lists the target app, call focus_window; "
-            "do not launch a second copy. Start with list_ui only if this snapshot is not enough."
+            "Canvas: if top_windows already lists the browser/tldraw, focus_window it. "
+            "Then prepare_art or drag using the playbook. You may call several drags in this turn."
+            if canvas
+            else (
+                "Call a tool. If top_windows already lists the target app, call focus_window; "
+                "do not launch a second copy. Start with list_ui only if this snapshot is not enough."
+            )
         )
     )
+    extra = ""
+    if canvas and not guide:
+        from desk_pilot.agent.canvas import art_subject, playbook_hint, window_rect_from_snapshot
+
+        extra = "\n\n" + playbook_hint(art_subject(goal), window_rect_from_snapshot(snapshot))
     return (
         f"Goal:\n{goal.strip()}\n\n"
         f"{mode}\n\n"
         "Current UI (compact UIA tree):\n"
         f"{_dump(snapshot)}\n\n"
-        f"{closer}"
+        f"{closer}{extra}"
     )
 
 
-def observation_message(snapshot: dict, step: int, max_steps: int, *, guide: bool = False) -> str:
+def observation_message(
+    snapshot: dict,
+    step: int,
+    max_steps: int,
+    *,
+    guide: bool = False,
+    canvas: bool = False,
+    playbook: str = "",
+) -> str:
     if guide:
         return (
             f"Step {step}/{max_steps} UI after the user continued:\n"
             f"{_dump(snapshot)}\n"
             "Verify, then call guide_step for the next human action (with automation_id, name, "
             "expected_title, or real x,y from this tree — never 0,0), or done/fail."
+        )
+    if canvas:
+        hint = playbook or (
+            "Canvas mode: UIA is thin. Screenshot if needed, then drag or prepare_art. "
+            "Several drag calls in this turn are OK."
+        )
+        return (
+            f"Step {step}/{max_steps} UI after the last action:\n"
+            f"{_dump(snapshot)}\n"
+            f"{hint}\n"
+            "Verify from the tree/screenshot, then act again or call done/fail."
         )
     return (
         f"Step {step}/{max_steps} UI after the last action:\n"

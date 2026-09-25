@@ -43,6 +43,9 @@ class MockDesktop(DesktopBackend):
         self.highlight_visible: list[int] | None = None
         self.fail_highlight = False
         self.fail_highlight_error = "UpdateLayeredWindow failed (GetLastError=87)"
+        self.drags: list[dict[str, Any]] = []
+        self.clipboard_image: str | None = None
+        self.steal_focus_after_action = False
 
     def reset(self) -> None:
         self.__init__()
@@ -92,10 +95,47 @@ class MockDesktop(DesktopBackend):
                     self._focus_app(existing)
                 else:
                     self._open_notepad()
-            return {"ok": True, "dry_run": True, "clicked": target, "window": self.window_title}
+            return self._maybe_steal_focus(
+                {"ok": True, "dry_run": True, "clicked": target, "window": self.window_title}
+            )
         if x is not None and y is not None:
-            return {"ok": True, "dry_run": True, "clicked": {"x": x, "y": y}, "note": "coordinate click (simulated)"}
+            result = {"ok": True, "dry_run": True, "clicked": {"x": x, "y": y}, "note": "coordinate click (simulated)"}
+            return self._maybe_steal_focus(result)
         return {"ok": False, "dry_run": True, "error": "No matching control. Use list_ui names/ids or coordinates."}
+
+    def drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        points: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        from desk_pilot.desktop.drag import build_drag_path
+
+        path = build_drag_path(int(x1), int(y1), int(x2), int(y2), points)
+        stroke = {
+            "from": [int(x1), int(y1)],
+            "to": [int(x2), int(y2)],
+            "points": [list(p) for p in path],
+        }
+        self.drags.append(stroke)
+        self.actions.append(f"drag {x1},{y1} -> {x2},{y2}")
+        result = {
+            "ok": True,
+            "dry_run": True,
+            "from": stroke["from"],
+            "to": stroke["to"],
+            "points": len(path),
+            "method": "mock",
+            "window": self.window_title,
+        }
+        return self._maybe_steal_focus(result)
+
+    def set_clipboard_image(self, path: str) -> dict[str, Any]:
+        self.clipboard_image = path
+        self.actions.append(f"clipboard {path}")
+        return {"ok": True, "dry_run": True, "path": path}
 
     def type_text(
         self,
@@ -113,14 +153,18 @@ class MockDesktop(DesktopBackend):
             self.edit_text = "" if clear else self.edit_text
             self.edit_text += text
             target = "Notepad.Edit" if self.scene == "notepad" else "focused"
-        return {
-            "ok": True,
-            "dry_run": True,
-            "typed": text,
-            "clear": clear,
-            "target": target,
-            "value": self.run_text if self.scene == "run" else self.edit_text,
-        }
+        if self.scene == "tldraw" and "tldraw" in text.lower():
+            self._open_tldraw()
+        return self._maybe_steal_focus(
+            {
+                "ok": True,
+                "dry_run": True,
+                "typed": text,
+                "clear": clear,
+                "target": target,
+                "value": self.run_text if self.scene == "run" else self.edit_text,
+            }
+        )
 
     def hotkey(self, keys: str) -> dict[str, Any]:
         chord = (keys or "").strip().lower().replace(" ", "")
@@ -140,6 +184,11 @@ class MockDesktop(DesktopBackend):
                 self.scene = "desktop"
                 self.window_title = "Desktop"
                 return {"ok": True, "dry_run": True, "keys": chord, "window": "Desktop", "note": "Dismissed launch-error dialog."}
+            if self.scene == "run" and "tldraw" in self.run_text.lower():
+                self._open_tldraw()
+                return self._maybe_steal_focus(
+                    {"ok": True, "dry_run": True, "keys": chord, "window": self.window_title}
+                )
             if self.scene == "run" and "notepad" in self.run_text.lower():
                 self._open_notepad()
                 return {"ok": True, "dry_run": True, "keys": chord, "window": "Untitled - Notepad"}
@@ -164,7 +213,16 @@ class MockDesktop(DesktopBackend):
             pass
         if chord in {"ctrl+s"}:
             return {"ok": True, "dry_run": True, "keys": chord, "note": "Save simulated (no file dialog)."}
-        return {"ok": True, "dry_run": True, "keys": chord, "window": self.window_title}
+        if chord in {"ctrl+v"} and self.clipboard_image:
+            self.actions.append(f"paste {self.clipboard_image}")
+            return {
+                "ok": True,
+                "dry_run": True,
+                "keys": chord,
+                "window": self.window_title,
+                "pasted": self.clipboard_image,
+            }
+        return self._maybe_steal_focus({"ok": True, "dry_run": True, "keys": chord, "window": self.window_title})
 
     def screenshot_region(self, x: int, y: int, width: int, height: int) -> dict[str, Any]:
         from PIL import Image, ImageDraw
@@ -241,6 +299,16 @@ class MockDesktop(DesktopBackend):
                 "dry_run": True,
                 "method": "mock_catalog",
                 "started": "notepad",
+                "window": self.window_title,
+            }
+        if any(token in key for token in ("tldraw", "chrome", "edge", "firefox", "msedge")):
+            title = "tldraw" if "tldraw" in key else query
+            self._open_tldraw(title=title)
+            return {
+                "ok": True,
+                "dry_run": True,
+                "method": "mock_catalog",
+                "started": "tldraw" if "tldraw" in key else key,
                 "window": self.window_title,
             }
         self._open_run_not_found(query)
@@ -380,11 +448,30 @@ class MockDesktop(DesktopBackend):
     def hide_highlight(self) -> None:
         self.highlight_visible = None
 
+    def _maybe_steal_focus(self, result: dict[str, Any]) -> dict[str, Any]:
+        if not self.steal_focus_after_action:
+            return result
+        if self.scene == "desk_pilot":
+            return result
+        self._focus_before_steal = {
+            "scene": self.scene,
+            "title": self.window_title,
+        }
+        self.scene = "desk_pilot"
+        self.window_title = "Desk Pilot"
+        return result
+
     def _open_notepad(self) -> None:
         self.scene = "notepad"
         self.edit_text = ""
         self.window_title = "Untitled - Notepad"
         self._upsert_app("notepad", self.window_title, "notepad", rect=[0, 0, 810, 570])
+
+    def _open_tldraw(self, title: str = "tldraw") -> None:
+        label = "tldraw" if "tldraw" in (title or "").lower() else (title or "tldraw")
+        self.scene = "tldraw"
+        self.window_title = f"{label} - Helium"
+        self._upsert_app("helium", self.window_title, "tldraw", rect=[80, 40, 1280, 800])
 
     def _upsert_app(
         self,
@@ -404,6 +491,8 @@ class MockDesktop(DesktopBackend):
     def _close_current_app(self) -> None:
         if self.scene == "notepad":
             self._open_apps.pop("notepad", None)
+        if self.scene == "tldraw":
+            self._open_apps.pop("helium", None)
 
     def _match_open_app(self, query: str) -> dict[str, str] | None:
         from desk_pilot.desktop.launch import window_match_score
@@ -422,10 +511,15 @@ class MockDesktop(DesktopBackend):
         self.window_title = app.get("name") or self.window_title
 
     def _top_window_summaries(self) -> list[dict[str, Any]]:
+        process = {
+            "notepad": "notepad",
+            "tldraw": "helium",
+            "desk_pilot": "python",
+        }.get(self.scene, "explorer")
         items: list[dict[str, Any]] = [
             {
                 "name": self.window_title,
-                "process": "notepad" if self.scene == "notepad" else "explorer",
+                "process": process,
                 "focused": True,
             }
         ]
@@ -487,6 +581,56 @@ class MockDesktop(DesktopBackend):
                 _ctrl(name="Close", ctype="Button", aid="Close", rect=[770, 8, 800, 32], path="Untitled - Notepad/TitleBar/Close"),
             ]
             focused = {**focused, "value": self.edit_text}
+            return window, focused, controls
+        if self.scene == "tldraw":
+            title = self.window_title
+            window = {
+                "name": title,
+                "type": "Window",
+                "class": "Chrome_WidgetWin_1",
+                "process": "helium",
+                "rect": [80, 40, 1280, 800],
+            }
+            focused = _ctrl(
+                name="Address and search bar",
+                ctype="Edit",
+                aid="urlbar",
+                rect=[140, 48, 720, 76],
+                path=f"{title}/Toolbar/Address",
+            )
+            # Chrome chrome only — the tldraw canvas is not in UIA (live ~10 controls).
+            controls = [
+                _ctrl(name=title, ctype="Window", aid="Browser", rect=[80, 40, 1280, 800], path=title),
+                _ctrl(name="Back", ctype="Button", aid="back", rect=[90, 48, 118, 76], path=f"{title}/Toolbar/Back"),
+                _ctrl(name="Forward", ctype="Button", aid="fwd", rect=[118, 48, 146, 76], path=f"{title}/Toolbar/Forward"),
+                _ctrl(name="Reload", ctype="Button", aid="reload", rect=[146, 48, 174, 76], path=f"{title}/Toolbar/Reload"),
+                focused,
+                _ctrl(name="tldraw", ctype="TabItem", aid="tab", rect=[180, 12, 280, 40], path=f"{title}/Tab"),
+                _ctrl(name="Document", ctype="Document", aid="Chrome_RenderWidgetHostHWND", rect=[80, 88, 1280, 800], path=f"{title}/Document"),
+                _ctrl(name="Close", ctype="Button", aid="Close", rect=[1248, 44, 1272, 68], path=f"{title}/TitleBar/Close"),
+            ]
+            return window, focused, controls
+        if self.scene == "desk_pilot":
+            window = {
+                "name": "Desk Pilot",
+                "type": "Window",
+                "class": "TkTopLevel",
+                "process": "python",
+                "rect": [40, 40, 720, 640],
+            }
+            focused = _ctrl(
+                name="Goal",
+                ctype="Edit",
+                aid="goal",
+                rect=[60, 120, 680, 160],
+                path="Desk Pilot/Goal",
+            )
+            controls = [
+                _ctrl(name="Desk Pilot", ctype="Window", aid="DeskPilot", rect=[40, 40, 720, 640], path="Desk Pilot"),
+                focused,
+                _ctrl(name="Run", ctype="Button", aid="run", rect=[60, 180, 140, 220], path="Desk Pilot/Run"),
+                _ctrl(name="STOP", ctype="Button", aid="stop", rect=[160, 180, 260, 220], path="Desk Pilot/STOP"),
+            ]
             return window, focused, controls
         if self.scene == "start":
             window = {"name": "Start", "type": "Window", "class": "Windows.UI.Core.CoreWindow"}

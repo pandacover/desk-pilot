@@ -89,6 +89,22 @@ class MockDesktopTests(unittest.TestCase):
         focused = self.desk.focus_window(title_contains="Notepad")
         self.assertTrue(focused["ok"])
 
+    def test_drag_records_stroke(self) -> None:
+        result = self.desk.drag(10, 20, 80, 90)
+        self.assertTrue(result["ok"])
+        self.assertEqual(self.desk.drags[-1]["from"], [10, 20])
+        self.assertEqual(self.desk.drags[-1]["to"], [80, 90])
+
+    def test_tldraw_scene_is_thin_tree(self) -> None:
+        opened = self.desk.launch_app("tldraw")
+        self.assertTrue(opened["ok"])
+        tree = self.desk.list_ui()
+        self.assertIn("tldraw", tree["window"]["name"].lower())
+        self.assertLessEqual(len(tree["controls"]), 10)
+        names = [c["name"] for c in tree["controls"]]
+        self.assertIn("Address and search bar", names)
+        self.assertNotIn("Canvas", names)
+
 
 if __name__ == "__main__":
     unittest.main()

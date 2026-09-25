@@ -68,7 +68,7 @@ python -m desk_pilot --cli --mock --goal "Open Notepad and type hello"
 ## How it works
 
 ```
-observe (UIA tree) → plan (OpenRouter tools) → act (click / type / hotkey) → verify → repeat
+observe (UIA tree) → plan (OpenRouter tools) → act (click / type / hotkey / drag) → verify → repeat
 ```
 
 Tools the model can call:
@@ -77,11 +77,13 @@ Tools the model can call:
 | --- | --- |
 | `list_ui` | Compact UIA tree: name, type, automation id, rect, short path |
 | `click` | By automation id, name, or coordinates |
+| `drag` | Mouse-down → move → up (optional polyline). Auto mode only; for canvases |
+| `prepare_art` | Sketch/draw goals: PNG (OpenRouter image or geometric) + clipboard, else drag playbook |
 | `type_text` | Type into the focused or targeted control |
-| `hotkey` | `win+r`, `enter`, `ctrl+s`, … |
+| `hotkey` | `win+r`, `enter`, `ctrl+s`, `ctrl+v`, … |
 | `list_windows` / `focus_window` | Reuse an already-open app instead of launching another copy |
 | `launch_app` | Start an installed app, or focus it if it is already running |
-| `screenshot_region` | mss crop; last resort |
+| `screenshot_region` | mss crop; last resort except in canvas mode |
 | `wait_for_window` | Title / focus change |
 | `done` / `fail` | End the run |
 
@@ -89,14 +91,47 @@ Default model: `openai/gpt-6-luna`. Reasoning is requested with `reasoning.effor
 
 Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_window` (or `launch_app`, which reuses). Otherwise `launch_app notepad` → `wait_for_window` → `type_text hello` → `done`.
 
+The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once. Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+
 ## Auto vs Guide
 
-- **Auto** (default): a goal like `Open Helium and search for a dank meme` — the agent clicks and types. No sketch overlay.
+- **Auto** (default): a goal like `Open Helium and search for a dank meme` — the agent clicks and types. No sketch overlay. `open tldraw and sketch me a car` stays auto (it is not a how-to).
 - **Guide**: a goal like `How to open Helium and search for a dank meme`, or Settings **Guide mode**. The agent sketches one control, shows an instruction, and waits. You do the click or type. Then **Continue** (or F8). STOP cancels the lesson. The live log always records `SKETCH` (rect), `SKETCH skipped`, or `SKETCH failed`. Settings **Test sketch** draws a fixed rectangle for 2 seconds so you can tell the Win32 overlay apart from targeting.
 
 ```
 observe → plan one human step → sketch → you act → Continue → next step → done
 ```
+
+## Canvas mode (tldraw / Figma / Paint)
+
+UIA cannot see a whiteboard. A live tldraw tab is ~10 chrome controls and no Draw tool. Canvas mode turns on when the goal matches sketch/draw/paint/tldraw/Figma/canvas, or when the focused window is a browser/whiteboard with a thin tree.
+
+Then Desk Pilot:
+
+1. Biases the model to **screenshots + `drag`**, not more `list_ui` clicks.
+2. Attaches a window screenshot after observations on that surface.
+3. Lets the model emit several `drag`s in one turn (body rect, cabin, wheel ellipses).
+4. Restores the target window if Desk Pilot steals focus after a click.
+5. Prefers **create-then-insert**: `prepare_art` (OpenRouter image if the key supports `/images/generations`, else a geometric PNG/SVG). On Windows the PNG is copied to the clipboard (`ctrl+v`). If image gen or clipboard paste is unavailable, the fail is explicit and the geometric drag playbook is the fallback.
+
+## Pull latest (0.2.0-rc)
+
+Canvas drawing: drag tool, thin-tree routing, focus guard, art-goal paste/playbook.
+
+```powershell
+git pull
+pip install -r requirements.txt
+python -m desk_pilot
+```
+
+Then try **auto** (not Guide): `open tldraw and sketch me a car`.
+
+1. A browser should open (or focus) [tldraw.com](https://www.tldraw.com).
+2. The log should say **Canvas mode**, then `drag` strokes or `prepare_art` + `ctrl+v` — not a dozen chrome clicks.
+3. If paste is unavailable, you should still get a recognizable car from a few geometric drags (body + wheels), not 20 blind clicks.
+4. If Desk Pilot steals focus, the next line should restore the tldraw window.
+
+Guide mode stays for how-to goals only (`how to open tldraw…`).
 
 ## Pull latest (0.1.9)
 

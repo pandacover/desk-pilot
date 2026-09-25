@@ -316,6 +316,43 @@ class WindowsDesktop(DesktopBackend):
             return {"ok": False, "error": "Provide automation_id, name, or x and y."}
         return self._click_xy(int(x), int(y))
 
+    def drag(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        points: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        from desk_pilot.desktop.drag import build_drag_path
+
+        prep = self._prepare()
+        if prep:
+            return prep
+        path = build_drag_path(int(x1), int(y1), int(x2), int(y2), points)
+        if len(path) < 2:
+            return {"ok": False, "error": "drag needs two points."}
+        try:
+            from pynput.mouse import Button, Controller
+
+            mouse = Controller()
+            mouse.position = path[0]
+            time.sleep(0.02)
+            mouse.press(Button.left)
+            for x, y in path[1:]:
+                mouse.position = (x, y)
+                time.sleep(0.008)
+            mouse.release(Button.left)
+            return {
+                "ok": True,
+                "from": [int(x1), int(y1)],
+                "to": [int(x2), int(y2)],
+                "points": len(path),
+                "method": "pynput",
+            }
+        except Exception as exc:
+            return {"ok": False, "error": f"drag failed: {exc}"}
+
     def type_text(
         self,
         text: str,
@@ -701,11 +738,17 @@ class WindowsDesktop(DesktopBackend):
 
     def _window_meta(self, window: Any) -> dict[str, Any]:
         try:
+            process = ""
+            try:
+                process = _process_stem(int(window.ProcessId))
+            except Exception:
+                process = ""
             return {
                 "name": window.Name or "",
                 "type": _short_type(window.ControlTypeName),
                 "class": getattr(window, "ClassName", "") or "",
                 "automation_id": getattr(window, "AutomationId", "") or "",
+                "process": process,
                 "rect": _rect_list(window.BoundingRectangle),
             }
         except Exception as exc:
