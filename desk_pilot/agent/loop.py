@@ -53,6 +53,8 @@ class AgentLoop:
             {"role": "user", "content": user_goal_message(goal, snapshot, self.backend.dry_run)},
         ]
         self._log("observe", f"Window: {self._window_label(snapshot)}")
+        if snapshot.get("com_error"):
+            self._log("error", snapshot.get("error") or "list_ui COM failure")
 
         for step in range(1, self.max_steps + 1):
             if self._stopped():
@@ -74,7 +76,8 @@ class AgentLoop:
 
             if not tool_calls:
                 nudge = (
-                    "You must call a tool: an action, screenshot_region, wait_for_window, done, or fail."
+                    "You must call a tool: launch_app, an action, screenshot_region, "
+                    "wait_for_window, done, or fail."
                 )
                 self._messages.append({"role": "assistant", "content": content or ""})
                 self._messages.append({"role": "user", "content": nudge})
@@ -132,6 +135,8 @@ class AgentLoop:
 
             snapshot = self.backend.list_ui()
             self._log("observe", f"Window: {self._window_label(snapshot)}")
+            if snapshot.get("com_error"):
+                self._log("error", snapshot.get("error") or "list_ui COM failure")
             self._messages.append(
                 {
                     "role": "user",
@@ -180,8 +185,16 @@ class AgentLoop:
 
     def _window_label(self, snapshot: dict[str, Any]) -> str:
         window = snapshot.get("window") or {}
-        name = window.get("name") or "?"
         count = len(snapshot.get("controls") or [])
+        err = snapshot.get("error") or window.get("error") or ""
+        if snapshot.get("com_error") or "coinitialize" in str(err).lower():
+            return f"COM ERROR: {err or 'UI Automation not initialized'} · {count} controls"
+        launch_err = snapshot.get("launch_error")
+        if launch_err:
+            return f"Launch dialog: {launch_err} · {count} controls"
+        name = window.get("name") or "?"
+        if snapshot.get("ok") is False and err:
+            return f"{name} · {count} controls (error: {err})"
         return f"{name} · {count} controls"
 
     def _stopped(self) -> bool:
