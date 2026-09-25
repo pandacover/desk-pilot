@@ -23,6 +23,7 @@ LOG_COLORS = {
     "plan": "#c4b5fd",
     "act": "#fbbf24",
     "guide": "#fde68a",
+    "sketch": "#fbbf24",
     "done": "#4ade80",
     "fail": "#f87171",
     "error": "#f87171",
@@ -48,6 +49,7 @@ class DeskPilotApp(ctk.CTk):
         self._worker: threading.Thread | None = None
         self._running = False
         self._guide_waiting = False
+        self._testing_sketch = False
 
         self._build()
         self._bind_keys()
@@ -210,8 +212,23 @@ class DeskPilotApp(ctk.CTk):
             variable=self.guide_var,
         ).grid(row=9, column=0, sticky="w", padx=14, pady=(6, 0))
 
+        self.test_sketch_btn = ctk.CTkButton(
+            settings,
+            text="Test sketch",
+            command=self._on_test_sketch,
+        )
+        self.test_sketch_btn.grid(row=10, column=0, sticky="ew", padx=14, pady=(10, 0))
+        ctk.CTkLabel(
+            settings,
+            text="Draws a fixed rectangle on the desktop for 2 seconds. Use this to tell Win32 overlay apart from agent targeting.",
+            text_color="#9aa3b2",
+            wraplength=300,
+            anchor="w",
+            justify="left",
+        ).grid(row=11, column=0, sticky="w", padx=14, pady=(4, 0))
+
         ctk.CTkButton(settings, text="Save settings", command=self._save_settings).grid(
-            row=10, column=0, sticky="ew", padx=14, pady=(12, 14)
+            row=12, column=0, sticky="ew", padx=14, pady=(12, 14)
         )
 
         log_frame = ctk.CTkFrame(self)
@@ -357,6 +374,46 @@ class DeskPilotApp(ctk.CTk):
             client.close()
         self._log_queue.put(("_finished", result.status + "\n" + result.message))
 
+    def _on_test_sketch(self) -> None:
+        if getattr(self, "_testing_sketch", False):
+            return
+        self._testing_sketch = True
+        self.test_sketch_btn.configure(state="disabled")
+        self._log("info", "Test sketch: drawing a fixed rectangle for 2 seconds…")
+        threading.Thread(target=self._test_sketch_worker, daemon=True).start()
+
+    def _test_sketch_worker(self) -> None:
+        import time
+
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, TEST_SKETCH_RECT, TEST_SKETCH_SECONDS, as_rect
+
+        box = as_rect(TEST_SKETCH_RECT)
+        try:
+            result = self.backend.show_highlight(box)
+        except Exception as exc:  # noqa: BLE001
+            result = {"ok": False, "skipped": False, "error": f"{type(exc).__name__}: {exc}", "rect": box}
+        if not isinstance(result, dict):
+            result = {
+                "ok": bool(result),
+                "skipped": False,
+                "error": None if result else "show_highlight returned no result",
+                "rect": box,
+            }
+        if result.get("ok"):
+            extra = " dry-run (no Win32 overlay)" if result.get("dry_run") else ""
+            self._log_queue.put(("sketch", f"{result.get('rect') or box} test{extra}"))
+        elif result.get("skipped"):
+            self._log_queue.put(("sketch", f"skipped: {result.get('error') or SKIP_NO_RECT}"))
+        else:
+            self._log_queue.put(("sketch", f"failed: {result.get('error') or 'overlay error'}"))
+        time.sleep(TEST_SKETCH_SECONDS)
+        try:
+            self.backend.hide_highlight()
+        except Exception as exc:  # noqa: BLE001
+            self._log_queue.put(("sketch", f"failed: hide {exc}"))
+        self._log_queue.put(("info", "Test sketch finished."))
+        self._log_queue.put(("_test_sketch_done", ""))
+
     def _on_continue(self) -> None:
         if not self._running or not self._guide_waiting:
             return
@@ -406,6 +463,10 @@ class DeskPilotApp(ctk.CTk):
                 kind, message = self._log_queue.get_nowait()
                 if kind == "_finished":
                     self._finish_ui(message)
+                    continue
+                if kind == "_test_sketch_done":
+                    self._testing_sketch = False
+                    self.test_sketch_btn.configure(state="normal")
                     continue
                 if kind == "_guide":
                     self._set_guide_ui(message)
