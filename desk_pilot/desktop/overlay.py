@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
-from typing import Sequence
+from typing import Any, Sequence
 
 HIGHLIGHT_SECONDS = 0.4
 
@@ -18,30 +18,65 @@ class HighlightOverlay:
         self._hwnd = 0
         self._class_atom = 0
 
-    def show(self, rect: Sequence[float] | None) -> bool:
+    def show(self, rect: Sequence[float] | None) -> dict[str, Any]:
         """Paint the sketch and leave it up until hide(). Click-through, no focus steal."""
-        if sys.platform != "win32" or not rect:
-            return False
-        from desk_pilot.desktop.sketch import normalize_rect, render_sketch
+        from desk_pilot.desktop.rects import SKIP_NO_RECT, as_rect
+        from desk_pilot.desktop.sketch import render_sketch
 
-        left, top, right, bottom = normalize_rect(rect)
-        if (right - left) < 1 and (bottom - top) < 1:
-            return False
-        image, origin_x, origin_y = render_sketch(rect)
+        box = as_rect(rect)
+        if not box:
+            return {"ok": False, "skipped": True, "error": SKIP_NO_RECT, "rect": None}
+        if sys.platform != "win32":
+            return {
+                "ok": False,
+                "skipped": True,
+                "error": "overlay only on Windows",
+                "rect": box,
+            }
+        try:
+            image, origin_x, origin_y = render_sketch(box)
+        except Exception as exc:  # noqa: BLE001 — Pillow/geometry must surface
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": f"render_sketch {type(exc).__name__}: {exc}",
+                "rect": box,
+            }
         if image.width < 2 or image.height < 2:
-            return False
-        if not self._ensure_window():
-            return False
-        return bool(_blit(self._hwnd, image, origin_x, origin_y))
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": f"render_sketch produced {image.width}x{image.height} image",
+                "rect": box,
+            }
+        hwnd, err = self._ensure_window()
+        if not hwnd:
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": err or "CreateWindowExW failed",
+                "rect": box,
+            }
+        ok, blit_err = _blit(hwnd, image, origin_x, origin_y)
+        if not ok:
+            return {
+                "ok": False,
+                "skipped": False,
+                "error": blit_err or "UpdateLayeredWindow failed",
+                "rect": box,
+            }
+        return {"ok": True, "skipped": False, "error": None, "rect": box}
 
-    def flash(self, rect: Sequence[float] | None, *, duration: float = HIGHLIGHT_SECONDS) -> None:
+    def flash(self, rect: Sequence[float] | None, *, duration: float = HIGHLIGHT_SECONDS) -> dict[str, Any]:
         """Brief show+hide (unused by auto-act; kept for tests)."""
-        if not self.show(rect):
-            return
+        result = self.show(rect)
+        if not result.get("ok"):
+            return result
         wait = max(0.0, min(1.0, float(duration)))
         if wait:
             time.sleep(wait)
         self.hide()
+        return result
 
     def hide(self) -> None:
         if sys.platform != "win32" or not self._hwnd:
@@ -63,16 +98,18 @@ class HighlightOverlay:
             pass
         self._hwnd = 0
 
-    def _ensure_window(self) -> bool:
+    def _ensure_window(self) -> tuple[int, str | None]:
         if sys.platform != "win32":
-            return False
+            return 0, "overlay only on Windows"
         if self._hwnd:
-            return True
+            return self._hwnd, None
         try:
-            self._hwnd = _create_overlay_hwnd()
-        except Exception:
+            hwnd, err = _create_overlay_hwnd()
+        except Exception as exc:  # noqa: BLE001 — Win32 class/window create must surface
             self._hwnd = 0
-        return bool(self._hwnd)
+            return 0, f"{type(exc).__name__}: {exc}"
+        self._hwnd = hwnd
+        return hwnd, err
 
 
 def get_overlay() -> HighlightOverlay:
@@ -95,7 +132,21 @@ def _ctypes():  # lazy so Linux imports stay cheap
     return ctypes
 
 
-def _create_overlay_hwnd() -> int:
+def _win_error(label: str) -> str:
+    import ctypes
+
+    err = ctypes.get_last_error()
+    detail = ""
+    try:
+        detail = (ctypes.FormatError(err) or "").strip()
+    except Exception:
+        detail = ""
+    if detail:
+        return f"{label} (GetLastError={err} {detail})"
+    return f"{label} (GetLastError={err})"
+
+
+def _create_overlay_hwnd() -> tuple[int, str | None]:
     import ctypes
     from ctypes import wintypes
 
@@ -155,7 +206,7 @@ def _create_overlay_hwnd() -> int:
     if not atom:
         err = ctypes.get_last_error()
         if err != ERROR_CLASS_ALREADY_EXISTS:
-            return 0
+            return 0, _win_error("RegisterClassW failed")
 
     user32.CreateWindowExW.restype = wintypes.HWND
     user32.CreateWindowExW.argtypes = [
@@ -187,10 +238,12 @@ def _create_overlay_hwnd() -> int:
         hinstance,
         None,
     )
-    return int(hwnd or 0)
+    if not hwnd:
+        return 0, _win_error("CreateWindowExW failed")
+    return int(hwnd), None
 
 
-def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> bool:
+def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> tuple[bool, str | None]:
     import ctypes
     from ctypes import wintypes
 
@@ -252,16 +305,20 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> bool:
 
     hdc_screen = user32.GetDC(None)
     if not hdc_screen:
-        return False
+        return False, _win_error("GetDC failed")
     bits = ctypes.c_void_p()
     gdi32.CreateDIBSection.restype = wintypes.HBITMAP
     hbm = gdi32.CreateDIBSection(hdc_screen, ctypes.byref(bmi), 0, ctypes.byref(bits), None, 0)
     if not hbm or not bits:
         user32.ReleaseDC(None, hdc_screen)
-        return False
+        return False, _win_error("CreateDIBSection failed")
     ctypes.memmove(bits, bgra, len(bgra))
 
     hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+    if not hdc_mem:
+        gdi32.DeleteObject(hbm)
+        user32.ReleaseDC(None, hdc_screen)
+        return False, _win_error("CreateCompatibleDC failed")
     old = gdi32.SelectObject(hdc_mem, hbm)
     blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
     pt_dst = POINT(int(origin_x), int(origin_y))
@@ -302,11 +359,12 @@ def _blit(hwnd: int, image, origin_x: int, origin_y: int) -> bool:
             ULW_ALPHA,
         )
     )
+    blit_err = None if ok else _win_error("UpdateLayeredWindow failed")
     gdi32.SelectObject(hdc_mem, old)
     gdi32.DeleteDC(hdc_mem)
     gdi32.DeleteObject(hbm)
     user32.ReleaseDC(None, hdc_screen)
-    return ok
+    return ok, blit_err
 
 
 _wndproc_ref = None
