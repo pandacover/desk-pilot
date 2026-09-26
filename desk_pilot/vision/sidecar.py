@@ -28,11 +28,12 @@ from desk_pilot.vision import (
     DEFAULT_PORT,
     HEALTH_STATUSES,
     SCENE_MAX_EDGE,
-    SCENE_MAX_EDGE_CPU,
     SCENE_MAX_NEW_TOKENS,
+    SCENE_MIN_TOWER_EDGE,
+    SCENE_NATIVE_CROP,
     missing_package_name,
 )
-from desk_pilot.vision.capture import fit_max_edge
+from desk_pilot.vision.capture import ensure_min_edge, fit_max_edge, tower_spatial_ok
 from desk_pilot.vision.scene import SCENE_PROMPT, empty_scene, json_object_complete, parse_scene_text
 
 IMAGE_TOKEN_INDEX = -200
@@ -59,6 +60,7 @@ def health_payload() -> dict[str, Any]:
             "device": _device,
             "model": DEFAULT_MODEL_ID if _mode == "fastvlm" else None,
             "max_edge": _max_edge,
+            "min_tower_edge": SCENE_MIN_TOWER_EDGE,
             "max_new_tokens": SCENE_MAX_NEW_TOKENS,
         }
         if _error:
@@ -113,16 +115,16 @@ def load_model() -> None:
         cuda = bool(torch.cuda.is_available())
         device = "cuda" if cuda else "cpu"
         dtype = torch.float16 if cuda else torch.float32
-        _max_edge = SCENE_MAX_EDGE if cuda else SCENE_MAX_EDGE_CPU
+        _max_edge = SCENE_NATIVE_CROP
         _configure_torch(torch, cuda=cuda)
         set_state(
             status="loading",
             phase="loading_weights",
             mode="fastvlm",
             device=device,
-            note=None if cuda else "CPU is OK; first load is slow. /scene uses a 512px crop.",
+            note=None if cuda else "CPU is OK; first load is slow. /scene uses the native 1024px crop.",
         )
-        sidecar_log(f"loading {DEFAULT_MODEL_ID} device={device} dtype={dtype} max_edge={_max_edge}")
+        sidecar_log(f"loading {DEFAULT_MODEL_ID} device={device} dtype={dtype} crop={_max_edge}")
         tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL_ID, trust_remote_code=True)
         kwargs: dict[str, Any] = {
             "torch_dtype": dtype,
@@ -156,11 +158,11 @@ def load_model() -> None:
             note=(
                 None
                 if cuda
-                else f"CPU inference at {_max_edge}px / {SCENE_MAX_NEW_TOKENS} tokens (greedy)."
+                else f"CPU inference at native {SCENE_NATIVE_CROP}px crop / {SCENE_MAX_NEW_TOKENS} tokens (greedy)."
             ),
         )
         sidecar_log(
-            f"ready device={device}{quant_note} max_edge={_max_edge} max_new_tokens={SCENE_MAX_NEW_TOKENS}"
+            f"ready device={device}{quant_note} crop={_max_edge} max_new_tokens={SCENE_MAX_NEW_TOKENS}"
         )
     except Exception as exc:  # noqa: BLE001
         set_state(
@@ -220,13 +222,18 @@ def infer_scene(path: str | None, image_bytes: bytes | None, window: str, region
     image = _open_image(path, image_bytes)
     if image is None:
         return empty_scene(window=window, region=region, note="could not open screenshot")
-    image = fit_max_edge(image, max_edge)
+    src_w, src_h = int(image.size[0]), int(image.size[1])
+    image = ensure_min_edge(fit_max_edge(image, max_edge), SCENE_MIN_TOWER_EDGE)
+    sidecar_log(
+        f"vision image {src_w}x{src_h} -> {int(image.size[0])}x{int(image.size[1])} "
+        f"(native crop {SCENE_NATIVE_CROP})"
+    )
     prompt = (
         f"{SCENE_PROMPT} region={json.dumps(region, separators=(',', ':'))} "
         f"window={window or '?'}"
     )
     try:
-        text = _generate(model, tokenizer, image, prompt, max_edge=max_edge)
+        text = _generate(model, tokenizer, image, prompt)
     except Exception as exc:  # noqa: BLE001
         return empty_scene(window=window, region=region, note=f"FastVLM generate failed: {exc}")
     return parse_scene_text(text, window=window, region=region)
@@ -244,7 +251,7 @@ def _open_image(path: str | None, image_bytes: bytes | None):
     return None
 
 
-def _generate(model: Any, tokenizer: Any, image: Any, prompt: str, *, max_edge: int) -> str:
+def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
     import torch
 
     messages = [{"role": "user", "content": f"<image>\n{prompt}"}]
@@ -257,7 +264,7 @@ def _generate(model: Any, tokenizer: Any, image: Any, prompt: str, *, max_edge: 
     img_tok = torch.tensor([[IMAGE_TOKEN_INDEX]], dtype=pre_ids.dtype)
     input_ids = torch.cat([pre_ids, img_tok, post_ids], dim=1).to(model.device)
     attention_mask = torch.ones_like(input_ids, device=model.device)
-    px = _pixel_values(model, image, max_edge=max_edge)
+    px = _pixel_values(model, image)
     px = px.to(model.device, dtype=getattr(model, "dtype", px.dtype))
     stopping = _json_stopping(tokenizer, int(input_ids.shape[-1]))
     gen_kwargs: dict[str, Any] = {
@@ -281,35 +288,71 @@ def _generate(model: Any, tokenizer: Any, image: Any, prompt: str, *, max_edge: 
     return str(decoded or "")
 
 
-def _pixel_values(model: Any, image: Any, *, max_edge: int) -> Any:
+def _pixel_values(model: Any, image: Any) -> Any:
+    processor = model.get_vision_tower().image_processor
+    min_edge = _processor_crop_edge(processor)
+    px = processor(images=image, return_tensors="pt")["pixel_values"]
+    px, note = ensure_tower_pixels(px, min_edge=min_edge)
+    height, width = _pixel_hw(px)
+    sidecar_log(
+        f"vision tower input {width}x{height} min={min_edge}"
+        + (f" ({note})" if note else "")
+    )
+    if not tower_spatial_ok(height, width, min_edge=min_edge):
+        raise RuntimeError(
+            f"FastVLM tower input {width}x{height} is below native {min_edge}px crop "
+            f"(would pool to 0x0, e.g. 3072x12x12 from a 768px encode)"
+        )
+    return px
+
+
+def _processor_crop_edge(processor: Any) -> int:
+    crop = getattr(processor, "crop_size", None)
+    values: list[int] = []
+    if isinstance(crop, dict):
+        for key in ("height", "width", "h", "w"):
+            try:
+                values.append(int(crop.get(key) or 0))
+            except (TypeError, ValueError):
+                pass
+    elif isinstance(crop, (list, tuple)):
+        for item in crop[:2]:
+            try:
+                values.append(int(item))
+            except (TypeError, ValueError):
+                pass
+    elif isinstance(crop, (int, float)):
+        values.append(int(crop))
+    native = max(values) if values else 0
+    return max(native, SCENE_MIN_TOWER_EDGE)
+
+
+def _pixel_hw(px: Any) -> tuple[int, int]:
+    shape = getattr(px, "shape", None)
+    if shape is None or len(shape) < 2:
+        return 0, 0
+    return int(shape[-2]), int(shape[-1])
+
+
+def ensure_tower_pixels(px: Any, *, min_edge: int) -> tuple[Any, str | None]:
+    """Upscale pixel_values so H and W are at least FastVLM's native crop (no downscale)."""
+    height, width = _pixel_hw(px)
+    if tower_spatial_ok(height, width, min_edge=min_edge):
+        return px, None
     import torch.nn.functional as F
 
-    processor = model.get_vision_tower().image_processor
-    px = None
-    try:
-        px = processor(
-            images=image,
-            return_tensors="pt",
-            size={"shortest_edge": max_edge},
-            crop_size={"height": max_edge, "width": max_edge},
-        )["pixel_values"]
-    except TypeError:
-        px = processor(images=image, return_tensors="pt")["pixel_values"]
-    if px is None:
-        raise RuntimeError("vision tower returned no pixel_values")
-    if px.ndim == 5 and px.shape[1] > 1:
-        # Any-res tiling: re-encode a fitted square so CPU does not run N vision passes.
-        square = fit_max_edge(image, max_edge)
-        px = processor(images=square, return_tensors="pt")["pixel_values"]
-    if px.ndim == 4:
-        height, width = int(px.shape[-2]), int(px.shape[-1])
-        longest = max(height, width)
-        if longest > max_edge:
-            scale = max_edge / float(longest)
-            nh = max(1, int(round(height * scale)))
-            nw = max(1, int(round(width * scale)))
-            px = F.interpolate(px, size=(nh, nw), mode="bilinear", align_corners=False)
-    return px
+    note = f"upscaled {width}x{height} -> {min_edge}x{min_edge}"
+    sidecar_log(f"vision tower pixels too small; {note}")
+    if getattr(px, "ndim", 0) == 4:
+        px = F.interpolate(px, size=(min_edge, min_edge), mode="bilinear", align_corners=False)
+        return px, note
+    if getattr(px, "ndim", 0) == 5:
+        batch, tiles, channels, _, _ = px.shape
+        flat = px.reshape(batch * tiles, channels, height, width)
+        flat = F.interpolate(flat, size=(min_edge, min_edge), mode="bilinear", align_corners=False)
+        px = flat.reshape(batch, tiles, channels, min_edge, min_edge)
+        return px, note
+    return px, note
 
 
 def _json_stopping(tokenizer: Any, prompt_len: int) -> Any | None:
@@ -358,7 +401,10 @@ class Handler(BaseHTTPRequestHandler):
                 size = f"{image.size[0]}x{image.size[1]}"
         except Exception:
             size = ""
-        sidecar_log(f"/scene start window={window!r} image={size or 'none'} max_edge={_max_edge}")
+        sidecar_log(
+            f"/scene start window={window!r} image={size or 'none'} "
+            f"native_crop={SCENE_NATIVE_CROP}"
+        )
         prev = health_payload().get("status")
         if prev in {"ready", "busy"}:
             set_state(status="busy", phase="inferring")
