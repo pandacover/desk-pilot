@@ -19,7 +19,7 @@ On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fak
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
-pip install -r requirements-vision.txt   # FastVLM sidecar (PyTorch + transformers)
+pip install -r requirements-vision.txt   # FastVLM sidecar (PyTorch, transformers, timm, …)
 python -m desk_pilot
 ```
 
@@ -108,6 +108,18 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` → `done` with the full paths. Not Win+S, not Edge, not Explorer search.
 
 The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once (and refreshes the FastVLM scene). Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+
+## Pull latest (0.2.6)
+
+FastVLM vision-tower extra: **timm** (plus einops / sentencepiece). Live Windows failed with `ImportError: … requires … timm`.
+
+```powershell
+git pull
+pip install -r requirements-vision.txt
+python -m desk_pilot
+```
+
+Expect the status chip to go **Loading vision model…** then **Vision ready** — not **Vision error**. If a package is still missing, the chip should say **Vision: missing timm** (or similar), not a generic error.
 
 ## Pull latest (0.2.5)
 

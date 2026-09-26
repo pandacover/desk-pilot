@@ -21,7 +21,7 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from desk_pilot.vision import DEFAULT_HOST, DEFAULT_MODEL_ID, DEFAULT_PORT
+from desk_pilot.vision import DEFAULT_HOST, DEFAULT_MODEL_ID, DEFAULT_PORT, missing_package_name
 from desk_pilot.vision.scene import SCENE_PROMPT, empty_scene, parse_scene_text
 
 IMAGE_TOKEN_INDEX = -200
@@ -85,11 +85,8 @@ def load_model() -> None:
         set_state(
             status="error",
             mode="fastvlm",
-            error=(
-                f"FastVLM deps missing ({type(exc).__name__}: {exc}). "
-                "Install with: pip install -r requirements-vision.txt"
-            ),
-            note="UI stays up; uncheck FastVLM in Settings or install vision deps.",
+            error=_short_exc(exc, prefix="FastVLM deps missing"),
+            note="UI stays up; uncheck FastVLM in Settings or: pip install -r requirements-vision.txt",
         )
         return
     try:
@@ -126,7 +123,7 @@ def load_model() -> None:
         set_state(
             status="error",
             mode="fastvlm",
-            error=f"FastVLM load failed: {type(exc).__name__}: {exc}",
+            error=_short_exc(exc, prefix="FastVLM load failed"),
             note=traceback.format_exc()[-400:],
         )
 
@@ -298,6 +295,16 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"fastvlm-sidecar bind failed: {exc}\n")
         return 1
     return 0
+
+
+def _short_exc(exc: BaseException, *, prefix: str) -> str:
+    blob = f"{type(exc).__name__}: {exc}"
+    pkg = missing_package_name(blob)
+    if pkg:
+        return f"missing {pkg}"
+    if len(blob) <= 48:
+        return blob
+    return f"{prefix}: {type(exc).__name__}"
 
 
 if __name__ == "__main__":

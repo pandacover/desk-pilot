@@ -147,7 +147,12 @@ class SidecarManager:
             device = health.get("device") or ""
             return f"Vision ready{f' ({device})' if device else ''}"
         err = str(health.get("error") or "vision error")
-        return "Vision error" if len(err) > 40 else f"Vision: {err}"
+        from desk_pilot.vision import short_health_error
+
+        short = short_health_error(err)
+        if short == "vision error":
+            return "Vision error"
+        return f"Vision: {short}"
 
     def scene_client(self) -> SceneClient | StubSceneClient | None:
         if not self.enabled:
