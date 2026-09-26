@@ -114,6 +114,11 @@ def capture_content_screenshot(
     if isinstance(snapshot, dict):
         win = snapshot.get("window") if isinstance(snapshot.get("window"), dict) else {}
         window = str((win or {}).get("name") or "")
+    if not window:
+        try:
+            window = str(backend.focused_window_name() or "")
+        except Exception:
+            window = ""
     capture_box = box or resolve_capture_box(backend, snapshot)
     region = region_from_box(capture_box)
     if not region:

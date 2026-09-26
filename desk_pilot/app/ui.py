@@ -680,9 +680,34 @@ class DeskPilotApp(ctk.CTk):
             set_overlay_pump(None)
         except Exception:
             pass
+        try:
+            from desk_pilot.app.instance import release_ui_lock
+
+            release_ui_lock()
+        except Exception:
+            pass
         self.destroy()
 
 
 def run_app(*, force_mock: bool = False) -> None:
-    app = DeskPilotApp(force_mock=force_mock)
-    app.mainloop()
+    from desk_pilot.app.instance import acquire_ui_lock, release_ui_lock
+
+    ok, other = acquire_ui_lock()
+    if not ok and other:
+        msg = (
+            f"Desk Pilot is already running (pid {other}). "
+            "Use that window; a second copy starts another FastVLM sidecar."
+        )
+        print(msg, file=sys.stderr)
+        try:
+            from tkinter import messagebox
+
+            messagebox.showinfo(APP_NAME, msg)
+        except Exception:
+            pass
+        return
+    try:
+        app = DeskPilotApp(force_mock=force_mock)
+        app.mainloop()
+    finally:
+        release_ui_lock()

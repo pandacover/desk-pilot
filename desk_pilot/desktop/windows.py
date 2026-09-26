@@ -271,16 +271,19 @@ class WindowsDesktop(DesktopBackend):
         name: str | None = None,
         x: int | None = None,
         y: int | None = None,
+        button: str | None = None,
     ) -> dict[str, Any]:
+        from desk_pilot.desktop.base import normalize_click_button
+
         prep = self._prepare()
         if prep:
             return prep
-        auto = self.auto
+        which = normalize_click_button(button)
         if automation_id or name:
             control = self._find_control(automation_id, name)
             if control is None:
                 if x is not None and y is not None:
-                    return self._click_xy(int(x), int(y))
+                    return self._click_xy(int(x), int(y), which)
                 return {
                     "ok": False,
                     "error": "Control not found. Pass coordinates or call list_ui again.",
@@ -293,7 +296,7 @@ class WindowsDesktop(DesktopBackend):
                 pass
             try:
                 rect = _rect_list(control.BoundingRectangle)
-                control.Click()
+                self._invoke_control_click(control, which)
                 return {
                     "ok": True,
                     "clicked": {
@@ -301,6 +304,7 @@ class WindowsDesktop(DesktopBackend):
                         "type": _short_type(control.ControlTypeName),
                         "automation_id": control.AutomationId,
                         "rect": rect,
+                        "button": which,
                     },
                 }
             except Exception as exc:
@@ -308,13 +312,28 @@ class WindowsDesktop(DesktopBackend):
                 if len(rect) == 4 and rect[2] > rect[0]:
                     cx = (rect[0] + rect[2]) // 2
                     cy = (rect[1] + rect[3]) // 2
-                    fallback = self._click_xy(cx, cy)
+                    fallback = self._click_xy(cx, cy, which)
                     fallback["note"] = f"UIA Click failed ({exc}); used coordinate fallback."
                     return fallback
                 return {"ok": False, "error": f"Click failed: {exc}"}
         if x is None or y is None:
             return {"ok": False, "error": "Provide automation_id, name, or x and y."}
-        return self._click_xy(int(x), int(y))
+        return self._click_xy(int(x), int(y), which)
+
+    def _invoke_control_click(self, control: Any, button: str) -> None:
+        if button == "right":
+            fn = getattr(control, "RightClick", None)
+            if callable(fn):
+                fn()
+                return
+            raise AttributeError("UIA RightClick is not available on this control")
+        if button == "double":
+            fn = getattr(control, "DoubleClick", None)
+            if callable(fn):
+                fn()
+                return
+            raise AttributeError("UIA DoubleClick is not available on this control")
+        control.Click()
 
     def drag(
         self,
@@ -961,6 +980,21 @@ class WindowsDesktop(DesktopBackend):
             return None
         return sketchable_rect(_rect_list(getattr(window, "BoundingRectangle", None)))
 
+    def focused_window_name(self) -> str:
+        prep = self._prepare()
+        if prep:
+            return ""
+        try:
+            window = self.auto.GetForegroundControl()
+        except Exception:
+            return ""
+        if window is None:
+            return ""
+        try:
+            return str(window.Name or "")
+        except Exception:
+            return ""
+
     def window_rect_by_title(self, title: str) -> list[int] | None:
         from desk_pilot.desktop.launch import is_agent_window, window_match_score
         from desk_pilot.desktop.rects import sketchable_rect
@@ -1025,18 +1059,41 @@ class WindowsDesktop(DesktopBackend):
         except Exception:
             return
 
-    def _click_xy(self, x: int, y: int) -> dict[str, Any]:
+    def _click_xy(self, x: int, y: int, button: str = "left") -> dict[str, Any]:
+        from desk_pilot.desktop.base import normalize_click_button
+
+        which = normalize_click_button(button)
+        auto_fn = None
+        if which == "right":
+            auto_fn = getattr(self.auto, "RightClick", None)
+        elif which == "double":
+            auto_fn = getattr(self.auto, "DoubleClick", None)
+        else:
+            auto_fn = getattr(self.auto, "Click", None)
         try:
+            if callable(auto_fn):
+                auto_fn(x, y)
+                return {"ok": True, "clicked": {"x": x, "y": y, "button": which}, "method": "uiautomation.Click"}
             self.auto.Click(x, y)
-            return {"ok": True, "clicked": {"x": x, "y": y}, "method": "uiautomation.Click"}
+            return {"ok": True, "clicked": {"x": x, "y": y, "button": which}, "method": "uiautomation.Click"}
         except Exception as exc:
             try:
                 from pynput.mouse import Button, Controller
 
                 mouse = Controller()
                 mouse.position = (x, y)
-                mouse.click(Button.left, 1)
-                return {"ok": True, "clicked": {"x": x, "y": y}, "method": "pynput", "note": str(exc)}
+                if which == "right":
+                    mouse.click(Button.right, 1)
+                elif which == "double":
+                    mouse.click(Button.left, 2)
+                else:
+                    mouse.click(Button.left, 1)
+                return {
+                    "ok": True,
+                    "clicked": {"x": x, "y": y, "button": which},
+                    "method": "pynput",
+                    "note": str(exc),
+                }
             except Exception as exc2:
                 return {"ok": False, "error": f"Click at {x},{y} failed: {exc2}"}
 

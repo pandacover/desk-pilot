@@ -51,6 +51,8 @@ class MockDesktop(DesktopBackend):
         self.hide_address_bar = False
         self.fail_type_text_relookup = False
         self.fail_handle_type = False
+        self.save_path = r"C:\Users\mock\Downloads\image.jpg"
+        self._menu_from = ""
         self.files_catalog: list[dict[str, Any]] = [
             {
                 "path": r"C:\Program Files (x86)\Steam\steamapps\common\Brawlhalla\Brawlhalla.exe",
@@ -98,10 +100,28 @@ class MockDesktop(DesktopBackend):
         name: str | None = None,
         x: int | None = None,
         y: int | None = None,
+        button: str | None = None,
     ) -> dict[str, Any]:
+        from desk_pilot.desktop.base import normalize_click_button
+
+        which = normalize_click_button(button)
         target = self._find(automation_id, name)
         label = (name or automation_id or f"{x},{y}").strip()
-        self.actions.append(f"click {label}")
+        self.actions.append(f"click {which} {label}")
+        if which == "right" and (
+            self.scene in {"tldraw", "visual"}
+            or (x is not None and y is not None and self.scene not in {"run", "run_error", "start", "save_dialog"})
+        ):
+            self._open_context_menu()
+            return self._maybe_steal_focus(
+                {
+                    "ok": True,
+                    "dry_run": True,
+                    "clicked": {"x": x, "y": y, "button": "right"} if x is not None else {**(target or {}), "button": "right"},
+                    "button": "right",
+                    "window": self.window_title,
+                }
+            )
         if target:
             aid = (target.get("automation_id") or "").lower()
             n = (target.get("name") or "").lower()
@@ -117,11 +137,34 @@ class MockDesktop(DesktopBackend):
                     self._focus_app(existing)
                 else:
                     self._open_notepad()
+            elif "save image as" in n or n in {"save as", "download"}:
+                self._open_save_dialog()
+            elif n == "save" and self.scene == "save_dialog":
+                saved = self._commit_save()
+                payload = {"ok": True, "dry_run": True, "clicked": target, "window": self.window_title}
+                payload.update(saved)
+                return self._maybe_steal_focus(payload)
+            elif n == "cancel" and self.scene in {"save_dialog", "context_menu"}:
+                self._restore_menu_parent()
             return self._maybe_steal_focus(
-                {"ok": True, "dry_run": True, "clicked": target, "window": self.window_title}
+                {"ok": True, "dry_run": True, "clicked": {**target, "button": which}, "button": which, "window": self.window_title}
             )
         if x is not None and y is not None:
-            result = {"ok": True, "dry_run": True, "clicked": {"x": x, "y": y}, "note": "coordinate click (simulated)"}
+            if which == "double" and self.scene in {"tldraw", "visual"}:
+                return self._maybe_steal_focus(
+                    {
+                        "ok": True,
+                        "dry_run": True,
+                        "clicked": {"x": x, "y": y, "button": "double"},
+                        "note": "coordinate double-click (simulated)",
+                    }
+                )
+            result = {
+                "ok": True,
+                "dry_run": True,
+                "clicked": {"x": x, "y": y, "button": which},
+                "note": "coordinate click (simulated)",
+            }
             return self._maybe_steal_focus(result)
         return {"ok": False, "dry_run": True, "error": "No matching control. Use list_ui names/ids or coordinates."}
 
@@ -175,6 +218,11 @@ class MockDesktop(DesktopBackend):
             self.run_text += text
             target = "Run.Open"
             value = self.run_text
+        elif self.scene == "save_dialog":
+            self.save_path = "" if clear else getattr(self, "save_path", "")
+            self.save_path += text
+            target = "SaveAs.FileName"
+            value = self.save_path
         elif self.scene == "tldraw":
             self.address_value = "" if clear else self.address_value
             self.address_value += text
@@ -236,6 +284,11 @@ class MockDesktop(DesktopBackend):
                 self.scene = "desktop"
                 self.window_title = "Desktop"
                 return {"ok": True, "dry_run": True, "keys": chord, "window": "Desktop", "note": "Dismissed launch-error dialog."}
+            if self.scene == "save_dialog":
+                saved = self._commit_save()
+                payload = {"ok": True, "dry_run": True, "keys": chord, "window": self.window_title}
+                payload.update(saved)
+                return self._maybe_steal_focus(payload)
             if self.scene == "run" and "tldraw" in self.run_text.lower():
                 self._open_tldraw()
                 return self._maybe_steal_focus(
@@ -269,7 +322,12 @@ class MockDesktop(DesktopBackend):
         if chord in {"ctrl+a"}:
             pass
         if chord in {"ctrl+s"}:
-            return {"ok": True, "dry_run": True, "keys": chord, "note": "Save simulated (no file dialog)."}
+            return {
+                "ok": True,
+                "dry_run": True,
+                "keys": chord,
+                "note": "Save simulated (no file dialog). Ctrl+S on a page often writes HTML.",
+            }
         if chord in {"ctrl+v"} and self.clipboard_image:
             self.actions.append(f"paste {self.clipboard_image}")
             return {
@@ -491,6 +549,9 @@ class MockDesktop(DesktopBackend):
                     return box
         return sketchable_rect((focused or {}).get("rect"))
 
+    def focused_window_name(self) -> str:
+        return str(self.window_title or "")
+
     def window_rect_by_title(self, title: str) -> list[int] | None:
         from desk_pilot.desktop.launch import window_match_score
         from desk_pilot.desktop.rects import sketchable_rect
@@ -598,6 +659,61 @@ class MockDesktop(DesktopBackend):
         self.address_value = url
         self._upsert_app("helium", self.window_title, "tldraw", rect=[80, 40, 1280, 800])
 
+    def _open_context_menu(self) -> None:
+        self._menu_from = self.scene
+        self._menu_title = self.window_title
+        self.scene = "context_menu"
+        self.window_title = "Context"
+
+    def _open_save_dialog(self) -> None:
+        self._menu_from = getattr(self, "_menu_from", None) or self.scene
+        if not getattr(self, "_menu_title", ""):
+            self._menu_title = self.window_title
+        self.scene = "save_dialog"
+        self.window_title = "Save As"
+        if not (getattr(self, "save_path", "") or "").strip():
+            self.save_path = r"C:\Users\mock\Downloads\image.jpg"
+
+    def _restore_menu_parent(self) -> None:
+        parent = getattr(self, "_menu_from", "") or "tldraw"
+        title = getattr(self, "_menu_title", "") or self.window_title
+        if parent in {"context_menu", "save_dialog"}:
+            parent = "tldraw"
+        self.scene = parent
+        self.window_title = title
+        self._menu_from = ""
+
+    def _commit_save(self) -> dict[str, Any]:
+        from pathlib import Path
+
+        dest = str(getattr(self, "save_path", "") or "").strip().strip('"')
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+        written = False
+        error = ""
+        if dest:
+            try:
+                path = Path(dest)
+                # Only write when the parent exists or is creatable (Linux CI uses /tmp).
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(jpeg)
+                written = True
+                dest = str(path)
+            except OSError as exc:
+                error = str(exc)
+        if dest:
+            self.files_catalog.append(
+                {
+                    "path": dest,
+                    "size": len(jpeg) if written else 0,
+                    "mtime": "2024-06-02T12:00:00Z",
+                }
+            )
+        self._restore_menu_parent()
+        payload: dict[str, Any] = {"saved": dest, "wrote": written}
+        if error and not written:
+            payload["note"] = f"mock could not write {dest}: {error}"
+        return payload
+
     def _upsert_app(
         self,
         process: str,
@@ -667,9 +783,13 @@ class MockDesktop(DesktopBackend):
         for item in controls:
             if aid and (item.get("automation_id") or "").lower() == aid:
                 return item
-        for item in controls:
-            if nam and nam in (item.get("name") or "").lower():
-                return item
+        if nam:
+            for item in controls:
+                if (item.get("name") or "").strip().lower() == nam:
+                    return item
+            for item in controls:
+                if nam in (item.get("name") or "").lower():
+                    return item
         return None
 
     def _scene_tree(self) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
@@ -800,6 +920,39 @@ class MockDesktop(DesktopBackend):
                 _ctrl(name=title, ctype="Window", aid="Error", rect=[40, 40, 420, 180], path=title),
                 _ctrl(name=message, ctype="Text", aid="65535", rect=[50, 60, 400, 100], path=f"{title}/Message"),
                 focused,
+            ]
+            return window, focused, controls
+        if self.scene == "context_menu":
+            window = {"name": "Context", "type": "Menu", "class": "#32768"}
+            focused = _ctrl(
+                name="Save image as",
+                ctype="MenuItem",
+                aid="save_image_as",
+                rect=[200, 200, 360, 224],
+                path="Context/Save image as",
+            )
+            controls = [
+                _ctrl(name="Context", ctype="Menu", aid="Context", rect=[196, 196, 380, 320], path="Context"),
+                focused,
+                _ctrl(name="Copy image", ctype="MenuItem", aid="copy_image", rect=[200, 224, 360, 248], path="Context/Copy image"),
+                _ctrl(name="Open", ctype="MenuItem", aid="open", rect=[200, 248, 360, 272], path="Context/Open"),
+            ]
+            return window, focused, controls
+        if self.scene == "save_dialog":
+            window = {"name": "Save As", "type": "Window", "class": "#32770"}
+            focused = _ctrl(
+                name="File name",
+                ctype="Edit",
+                aid="FileNameControlHost",
+                rect=[40, 360, 420, 388],
+                path="Save As/File name",
+            )
+            focused = {**focused, "value": getattr(self, "save_path", "")}
+            controls = [
+                _ctrl(name="Save As", ctype="Window", aid="SaveAs", rect=[20, 40, 520, 440], path="Save As"),
+                focused,
+                _ctrl(name="Save", ctype="Button", aid="1", rect=[280, 400, 360, 428], path="Save As/Save"),
+                _ctrl(name="Cancel", ctype="Button", aid="2", rect=[370, 400, 450, 428], path="Save As/Cancel"),
             ]
             return window, focused, controls
         window = {"name": "Desktop", "type": "Pane", "class": "#32769"}

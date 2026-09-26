@@ -4,6 +4,8 @@ Local **Windows computer-use agent**. You type a goal, Desk Pilot reads the focu
 
 The app window opens immediately. FastVLM loads in a background sidecar after the UI is shown (status: **Loading vision model…**, then **Vision ready**). **Run** stays disabled until the sidecar reports ready, unless you turn FastVLM off in Settings.
 
+While FastVLM infers, the live step log heartbeats (`scene still inferring… Ns`) instead of going quiet. When `/scene` returns it logs `scene: N elements · elapsed_ms` (and **timed out** / **empty** if that happened). Sidecar file log remains `%LOCALAPPDATA%\DeskPilot\fastvlm-sidecar.log`.
+
 On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fake in-memory Windows session (Start, Run dialog, Notepad) so you can develop and CI without a Windows box. Dry-run uses a FastVLM **stub** sidecar (no PyTorch weights) so the window still opens instantly.
 
 ## Requirements
@@ -87,7 +89,7 @@ Tools the model can call:
 | Tool | Purpose |
 | --- | --- |
 | `list_ui` | Compact UIA tree: name, type, automation id, rect, short path |
-| `click` | By automation id, name, or coordinates |
+| `click` | By automation id, name, or coordinates. `button=left` (default), `right` (context menu), or `double` |
 | `drag` | Mouse-down → move → up (optional polyline). Auto mode only; for canvases |
 | `prepare_art` | Sketch/draw goals: PNG (OpenRouter image or geometric) + clipboard, else drag playbook |
 | `type_text` | Type into the focused or targeted control |
@@ -108,6 +110,23 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` → `done` with the full paths. Not Win+S, not Edge, not Explorer search.
 
 The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once (and refreshes the FastVLM scene). Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+
+## Pull latest (0.2.9)
+
+Live CUDA after 0.2.8: tower was **1024×1024** but every `/scene` was `elements=0` `FastVLM returned no JSON` in ~8s. That is an **empty generate**, not a 768 encode. 0.2.9 stops JSON early-stop from firing on the prompt, logs `n_new` + decode preview, heartbeats the UI log, and adds right-click save. Encode stays 1024.
+
+```powershell
+git pull
+python -m desk_pilot
+```
+
+Windows CUDA re-run (Helium visual grid / corgi download):
+
+1. Only **one** Desk Pilot window and **one** sidecar. `fastvlm-sidecar.log` starts with `listening on http://127.0.0.1:8765 pid=…` **before** `loading apple/FastVLM`.
+2. Chip **Vision ready**. `vision tower input 1024x1024` (never 768 / 3072×0×0).
+3. After Goal: `capturing scene…` then `scene still inferring… Ns`. `/scene` lines include `generate n_new=… text='{…'`. `n_new` must be **> 0** and `elements` > 0 on a normal window. If empty, the note is `FastVLM returned no JSON (n_new=N)` plus a decode preview — not a silent blank.
+4. `/scene start window=` should be a real title, not `''`.
+5. Acts: `navigate` → scene-click a tile **or** `button=right` → Save image as → type a Downloads `.jpg` → Save. One `save check:`. Not Ctrl+S.
 
 ## Pull latest (0.2.8)
 

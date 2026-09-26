@@ -27,6 +27,7 @@ from desk_pilot.vision import (
     DEFAULT_MODEL_ID,
     DEFAULT_PORT,
     HEALTH_STATUSES,
+    JSON_STOP_EVERY,
     SCENE_MAX_EDGE,
     SCENE_MAX_NEW_TOKENS,
     SCENE_MIN_TOWER_EDGE,
@@ -34,7 +35,7 @@ from desk_pilot.vision import (
     missing_package_name,
 )
 from desk_pilot.vision.capture import ensure_min_edge, fit_max_edge, tower_spatial_ok
-from desk_pilot.vision.scene import SCENE_PROMPT, empty_scene, json_object_complete, parse_scene_text
+from desk_pilot.vision.scene import SCENE_PROMPT, decode_preview, empty_scene, json_object_complete, parse_scene_text
 
 IMAGE_TOKEN_INDEX = -200
 
@@ -228,15 +229,41 @@ def infer_scene(path: str | None, image_bytes: bytes | None, window: str, region
         f"vision image {src_w}x{src_h} -> {int(image.size[0])}x{int(image.size[1])} "
         f"(native crop {SCENE_NATIVE_CROP})"
     )
-    prompt = (
-        f"{SCENE_PROMPT} region={json.dumps(region, separators=(',', ':'))} "
+    prompt = scene_user_prompt(window, region)
+    try:
+        text, meta = _generate(model, tokenizer, image, prompt)
+    except Exception as exc:  # noqa: BLE001
+        sidecar_log(f"generate failed: {type(exc).__name__}: {exc}")
+        return empty_scene(window=window, region=region, note=f"FastVLM generate failed: {exc}")
+    n_new = int(meta.get("n_new") or 0)
+    preview = decode_preview(text, limit=96)
+    raw_preview = str(meta.get("raw_preview") or "")
+    sidecar_log(
+        f"generate n_new={n_new} total={meta.get('total')} prefix={meta.get('prefix')} "
+        f"skip_chars={meta.get('skip_chars')} raw_chars={meta.get('raw_chars')} "
+        f"text={preview!r} raw={raw_preview!r}"
+    )
+    if not (text or "").strip():
+        empty_note = f"FastVLM returned no JSON (n_new={n_new})"
+        detail = preview or raw_preview
+        if detail:
+            empty_note = f"{empty_note} {detail[:80]}"
+        return empty_scene(window=window, region=region, note=empty_note)
+    return parse_scene_text(text, window=window, region=region)
+
+
+def scene_user_prompt(window: str, region: dict[str, int]) -> str:
+    """User text after ``<image>``. Must not contain a balanced JSON object.
+
+    0.2.8 concatenated ``region={...}`` plus an example object into the prompt.
+    JSON early-stop then treated that example as a finished assistant reply.
+    """
+    return (
+        f"{SCENE_PROMPT} "
+        f"region_x={int(region.get('x') or 0)} region_y={int(region.get('y') or 0)} "
+        f"region_w={int(region.get('w') or 1)} region_h={int(region.get('h') or 1)} "
         f"window={window or '?'}"
     )
-    try:
-        text = _generate(model, tokenizer, image, prompt)
-    except Exception as exc:  # noqa: BLE001
-        return empty_scene(window=window, region=region, note=f"FastVLM generate failed: {exc}")
-    return parse_scene_text(text, window=window, region=region)
 
 
 def _open_image(path: str | None, image_bytes: bytes | None):
@@ -251,13 +278,27 @@ def _open_image(path: str | None, image_bytes: bytes | None):
     return None
 
 
-def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
+def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> tuple[str, dict[str, Any]]:
+    """Apple FastVLM generate. Returns (assistant_text, debug meta).
+
+    Live CUDA 0.2.8 logged empty decode (`FastVLM returned no JSON`) after a
+    1024 encode. Causes we guard here:
+
+    - Chat template must keep a literal ``<image>`` to splice IMAGE_TOKEN_INDEX.
+      If the template drops it, insert the marker — do not throw away the
+      Qwen assistant prefix.
+    - JSON early-stop used the *pre-image-expansion* prompt length. After
+      FastViT splices ~256 image tokens, that slice includes the prompt (which
+      used to contain a complete JSON example) and stopping fired with 0 new
+      assistant tokens. Stop only on tokens after the first generate callback.
+    - Do not override ``eos_token_id`` with pad/eos (Apple's snippet does not).
+      Qwen pad is ``<|endoftext|>`` and eos is ``<|im_end|>``; mixing them can
+      stop on the first special token so ``skip_special_tokens`` yields "".
+    - Log n_new and the first chars of skip/raw decode on every call.
+    """
     import torch
 
-    messages = [{"role": "user", "content": f"<image>\n{prompt}"}]
-    rendered = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
-    if "<image>" not in rendered:
-        rendered = f"<image>\n{prompt}"
+    rendered = render_chat_with_image(tokenizer, prompt)
     pre, post = rendered.split("<image>", 1)
     pre_ids = tokenizer(pre, return_tensors="pt", add_special_tokens=False).input_ids
     post_ids = tokenizer(post, return_tensors="pt", add_special_tokens=False).input_ids
@@ -266,7 +307,11 @@ def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
     attention_mask = torch.ones_like(input_ids, device=model.device)
     px = _pixel_values(model, image)
     px = px.to(model.device, dtype=getattr(model, "dtype", px.dtype))
-    stopping = _json_stopping(tokenizer, int(input_ids.shape[-1]))
+    sidecar_log(
+        f"generate prompt_len={int(input_ids.shape[-1])} "
+        f"image_index={int(pre_ids.shape[-1])} px={tuple(int(x) for x in px.shape)}"
+    )
+    stopping = _json_stopping(tokenizer)
     gen_kwargs: dict[str, Any] = {
         "inputs": input_ids,
         "attention_mask": attention_mask,
@@ -275,7 +320,7 @@ def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
         "do_sample": False,
         "use_cache": True,
     }
-    pad = getattr(tokenizer, "eos_token_id", None) or getattr(tokenizer, "pad_token_id", None)
+    pad = getattr(tokenizer, "pad_token_id", None)
     if pad is not None:
         gen_kwargs["pad_token_id"] = pad
     if stopping is not None:
@@ -283,9 +328,61 @@ def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
     inference = getattr(torch, "inference_mode", torch.no_grad)
     with inference():
         out = model.generate(**gen_kwargs)
-    new_tokens = out[0, input_ids.shape[-1] :]
-    decoded = tokenizer.decode(new_tokens, skip_special_tokens=True)
-    return str(decoded or "")
+    text, meta = _decode_new_text(tokenizer, out[0], int(input_ids.shape[-1]))
+    return text, meta
+
+
+def render_chat_with_image(tokenizer: Any, prompt: str) -> str:
+    """Qwen chat string that still contains a literal ``<image>`` splice point."""
+    messages = [{"role": "user", "content": f"<image>\n{prompt}"}]
+    rendered = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    if "<image>" not in rendered:
+        sidecar_log("chat template omitted <image>; inserting before assistant turn")
+        needle = "<|im_start|>assistant"
+        if needle in rendered:
+            rendered = rendered.replace(needle, "<image>\n" + needle, 1)
+        else:
+            rendered = f"<image>\n{rendered}"
+    return rendered
+
+
+def _decode_new_text(tokenizer: Any, out_ids: Any, prefix_len: int) -> tuple[str, dict[str, Any]]:
+    """Decode assistant tokens. Falls back if skip_special_tokens strips everything."""
+    total = int(out_ids.shape[-1])
+    if total > prefix_len:
+        new_tokens = out_ids[prefix_len:]
+    else:
+        new_tokens = out_ids[0:0]
+    n_new = int(new_tokens.shape[-1]) if hasattr(new_tokens, "shape") else 0
+    skip = tokenizer.decode(new_tokens, skip_special_tokens=True) if n_new else ""
+    raw = tokenizer.decode(new_tokens, skip_special_tokens=False) if n_new else ""
+    text = (skip or "").strip()
+    if not text and raw.strip():
+        text = _strip_chat_wrappers(raw)
+    if not text and total > prefix_len:
+        # Image expansion rewrote the prefix. Try the tail of the sequence.
+        tail = out_ids[-min(total, SCENE_MAX_NEW_TOKENS) :]
+        skip_tail = tokenizer.decode(tail, skip_special_tokens=True)
+        sidecar_log(
+            f"generate prefix mismatch total={total} prefix={prefix_len} "
+            f"tail={decode_preview(skip_tail, limit=80)!r}"
+        )
+        text = (skip_tail or "").strip()
+    meta = {
+        "n_new": n_new,
+        "total": total,
+        "prefix": prefix_len,
+        "skip_chars": len(skip or ""),
+        "raw_chars": len(raw or ""),
+        "raw_preview": decode_preview(raw, limit=80),
+    }
+    return text, meta
+
+
+def _strip_chat_wrappers(text: str) -> str:
+    blob = (text or "").replace("<|im_start|>", "\n").replace("<|im_end|>", "\n")
+    blob = blob.replace("<|endoftext|>", "")
+    return " ".join(blob.split()).strip()
 
 
 def _pixel_values(model: Any, image: Any) -> Any:
@@ -355,23 +452,48 @@ def ensure_tower_pixels(px: Any, *, min_edge: int) -> tuple[Any, str | None]:
     return px, note
 
 
-def _json_stopping(tokenizer: Any, prompt_len: int) -> Any | None:
+class JsonAssistantStop:
+    """Stop when the *assistant* JSON object is complete — not the prompt.
+
+    First call may see FastVLM's expanded image tokens. Using the original
+    prompt length as the slice start treated the (old) example JSON in the
+    prompt as 'done' and emitted 0 assistant tokens. Record length on the
+    first callback and never stop there.
+    """
+
+    def __init__(self, tokenizer: Any) -> None:
+        self._start: int | None = None
+        self._tok = tokenizer
+
+    def __call__(self, input_ids: Any, scores: Any = None, **kwargs: Any) -> bool:
+        n = int(input_ids.shape[-1])
+        if self._start is None:
+            self._start = n
+            return False
+        gen = input_ids[0, self._start :]
+        n_new = int(gen.shape[-1])
+        if n_new < 8:
+            return False
+        every = max(1, int(JSON_STOP_EVERY))
+        if n_new % every != 0 and n_new < SCENE_MAX_NEW_TOKENS:
+            return False
+        text = self._tok.decode(gen, skip_special_tokens=True)
+        if "{" not in (text or ""):
+            return False
+        return json_object_complete(text)
+
+
+def _json_stopping(tokenizer: Any) -> Any | None:
     try:
         from transformers import StoppingCriteria, StoppingCriteriaList
     except Exception:
         return None
 
-    class _JsonDone(StoppingCriteria):
-        def __init__(self) -> None:
-            self._prompt_len = prompt_len
-            self._tok = tokenizer
+    inner = JsonAssistantStop(tokenizer)
 
+    class _JsonDone(StoppingCriteria):
         def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
-            gen = input_ids[0, self._prompt_len :]
-            if int(gen.shape[-1]) < 8:
-                return False
-            text = self._tok.decode(gen, skip_special_tokens=True)
-            return json_object_complete(text)
+            return inner(input_ids, scores, **kwargs)
 
     return StoppingCriteriaList([_JsonDone()])
 
@@ -406,16 +528,30 @@ class Handler(BaseHTTPRequestHandler):
             f"native_crop={SCENE_NATIVE_CROP}"
         )
         prev = health_payload().get("status")
+        got_lock = _infer_lock.acquire(blocking=False)
+        scene: dict[str, Any]
+        if not got_lock:
+            # A previous generate is still running. Waiting here would stack another
+            # 1024² decode behind `_infer_lock` and freeze the next observe.
+            scene = empty_scene(window=window, region=region, note="sidecar busy; skipped stacked /scene")
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            scene["elapsed_ms"] = elapsed_ms
+            sidecar_log(f"/scene skip busy elapsed_ms={elapsed_ms}")
+            self._send(200, scene)
+            return
         if prev in {"ready", "busy"}:
             set_state(status="busy", phase="inferring")
-        scene: dict[str, Any] = empty_scene(window=window, region=region, note="infer failed")
+        scene = empty_scene(window=window, region=region, note="infer failed")
         try:
-            with _infer_lock:
-                scene = infer_scene(path, image_bytes, window, region)
+            scene = infer_scene(path, image_bytes, window, region)
         finally:
+            _infer_lock.release()
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             if health_payload().get("status") == "busy":
                 set_state(status="ready", phase="")
+            if isinstance(scene, dict):
+                scene = dict(scene)
+                scene["elapsed_ms"] = elapsed_ms
             count = len((scene if isinstance(scene, dict) else {}).get("elements") or [])
             note = str((scene or {}).get("note") or "")
             extra = f" note={note[:80]!r}" if note else ""
@@ -490,16 +626,37 @@ def main(argv: list[str] | None = None) -> int:
         "yes",
         "on",
     }
+    # Bind BEFORE loading weights. A second process used to start load_model
+    # then fail on port 8765, leaving two sidecars and one listener.
+    try:
+        httpd = ThreadingHTTPServer((args.host, int(args.port)), Handler)
+    except OSError as exc:
+        sys.stderr.write(f"fastvlm-sidecar bind failed: {exc}\n")
+        return 1
+    actual = httpd.server_address[1]
+    try:
+        from desk_pilot.app.instance import write_sidecar_pid
+
+        write_sidecar_pid(os.getpid())
+    except Exception:
+        pass
+    sys.stdout.write(f"FASTVLM_SIDECAR http://{args.host}:{actual}\n")
+    sys.stdout.flush()
+    sidecar_log(f"listening on http://{args.host}:{actual} pid={os.getpid()}")
     if stub:
         enter_stub("stub: FastVLM weights not loaded")
     else:
         set_state(status="loading", phase="loading_weights", mode="fastvlm", note="Loading vision model…")
         threading.Thread(target=load_model, name="fastvlm-load", daemon=True).start()
     try:
-        serve(args.host, int(args.port))
-    except OSError as exc:
-        sys.stderr.write(f"fastvlm-sidecar bind failed: {exc}\n")
-        return 1
+        httpd.serve_forever()
+    finally:
+        try:
+            from desk_pilot.app.instance import clear_sidecar_pid
+
+            clear_sidecar_pid(os.getpid())
+        except Exception:
+            pass
     return 0
 
 

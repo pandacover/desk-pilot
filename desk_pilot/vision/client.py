@@ -12,6 +12,8 @@ from desk_pilot.vision.scene import empty_scene, normalize_scene
 
 # Last-resort agent wait if /scene never returns. Tuned FastVLM should finish sooner.
 SCENE_INFER_TIMEOUT = 40.0
+# UI log heartbeat while the agent thread is blocked on /scene (or the planner).
+SCENE_HEARTBEAT = 2.5
 
 
 def default_sidecar_url() -> str:

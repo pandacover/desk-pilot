@@ -23,6 +23,10 @@ class DesktopBackend(ABC):
         """Bounding rect of the focused top-level window, if known."""
         return None
 
+    def focused_window_name(self) -> str:
+        """Title of the focused top-level window, if known."""
+        return ""
+
     def window_rect_by_title(self, title: str) -> list[int] | None:
         """Bounding rect of an open window whose title matches ``title``."""
         return None
@@ -55,8 +59,12 @@ class DesktopBackend(ABC):
         name: str | None = None,
         x: int | None = None,
         y: int | None = None,
+        button: str | None = None,
     ) -> dict[str, Any]:
-        """Click a control by automation id, name, or screen coordinates."""
+        """Click a control by automation id, name, or screen coordinates.
+
+        ``button`` is left (default), right (context menu), or double.
+        """
 
     @abstractmethod
     def drag(
@@ -135,3 +143,13 @@ class DesktopBackend(ABC):
         from desk_pilot.desktop.files import find_files as search
 
         return search(name=name, glob=glob, max_results=max_results)
+
+
+def normalize_click_button(value: Any = None) -> str:
+    """Map click.button to left | right | double."""
+    raw = str(value or "left").strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    if raw in {"right", "rightclick", "context", "secondary", "rightbutton"}:
+        return "right"
+    if raw in {"double", "doubleclick", "dbl", "dblclick", "dclick"}:
+        return "double"
+    return "left"

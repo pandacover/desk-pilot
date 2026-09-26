@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.9
+
+- **Empty FastVLM generations (live CUDA)**: 0.2.8 encode is fine (`vision tower input 1024x1024`) but every `/scene` returned `elements=0` with note exactly `FastVLM returned no JSON` (~7.4–8.2s). That note only happens when the decoded generate string is empty — not a schema mismatch. Cause: JSON early-stop used the **pre-expansion** prompt length. After FastViT splices image tokens, that slice included a **complete JSON example in the prompt** (and `region={...}`), so stopping fired with **0 assistant tokens** after the expensive encode. Skip-special decode of nothing is `""`. Fixes: (1) stop only on tokens after the first generate callback; (2) prompt has **no balanced JSON object**; (3) do not override `eos_token_id` (Qwen pad is `<|endoftext|>`, eos is `<|im_end|>`); (4) if the chat template drops `<image>`, insert it without throwing away the assistant prefix; (5) log `n_new` plus first chars of skip/raw decode on every `/scene`. Native 1024 crop unchanged.
+- **`window=''` on `/scene`**: capture ran overlapped with `list_ui` and passed `snapshot=None`, so the sidecar never got the title. Use `focused_window_name()` on the capture path.
+- **Two sidecars / two UIs**: bind HTTP **before** `load_model` (a second process used to load weights then fail on 8765). PID file + kill stale sidecar if `/health` is dead. UI pid lock refuses a second Desk Pilot window.
+- **Live log keeps moving during FastVLM**: `_join_scene_worker` waited up to 40s with no UI lines after `capturing scene…`. Heartbeat every ~2.5s (`scene still inferring… Ns`) and while waiting on the planner. When `/scene` returns: `scene: N elements · elapsed_ms` plus timed out / empty.
+- **Latency without shrinking encode**: do not stack a second `/scene` behind `_infer_lock`; JSON-stop every 4 *new assistant* tokens; greedy + 192 `max_new_tokens`.
+- **Grounded save**: `click` `button=left|right|double`. Right-click is a general context-menu primitive. One `verify_file` after Save dialog confirm. Not a Google Images recipe. Ctrl+S still does not auto-verify.
+
 ## 0.2.8
 
 - **FastVLM native 1024 crop**: 0.2.7 shrank encode to 512px (CPU) / 768px (CUDA) for speed. On live CUDA that produced FastViT features `(3072×12×12)` (768/64) which then pooled to `(3072×0×0)` — every `/scene` failed, every observe was `0 elements`. Restore Apple's **1024²** crop. Keep greedy decode, 192 new tokens, and JSON early-stop for latency. Upscale (never downscale) if `pixel_values` spatial size is below 1024. Log source WxH and vision-tower WxH on each `/scene`.
