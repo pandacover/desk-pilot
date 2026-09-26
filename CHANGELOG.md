@@ -2,7 +2,8 @@
 
 ## 0.2.7
 
-- **FastVLM observe no longer hangs after Goal**: `_observe_pair` logged nothing until scene inference returned. On CPU, FastVLM often takes longer than the 45s join, then the loop called `/scene` *again* on the agent thread — blocked behind the sidecar `_infer_lock` while the first generate was still running. The UI sat on “Starting agent loop / Goal” with no OBSERVE/PLAN. Join timeout now fail-opens to UIA (`empty_scene` note `scene timed out; continuing with UIA`) and does **not** start a second infer. Late daemon results are ignored for that step. Client `/scene` read timeout is 25s (was 60s). Log `capturing scene…` immediately, then timeout/skip.
+- **FastVLM observe no longer hangs after Goal**: `_observe_pair` logged nothing until scene inference returned. On CPU, FastVLM often takes longer than the 45s join, then the loop called `/scene` *again* on the agent thread — blocked behind the sidecar `_infer_lock` while the first generate was still running. The UI sat on “Starting agent loop / Goal” with no OBSERVE/PLAN. Join timeout now fail-opens to UIA (`empty_scene` note `scene timed out; continuing with UIA`) and does **not** start a second infer. Late daemon results are ignored for that step. Client `/scene` read timeout is 25s (was 60s). Every `_observe_pair` logs immediately (`capturing scene…` or `listing UI…`).
+- **STOP unsticks a blocked run**: observe checks `stop_event` and skips/abandons the scene wait. If the agent worker is still alive ~2.5s after STOP, the UI force-clears `_running` so **Run** works again and logs that the stuck step was abandoned. A late finish from that worker is ignored. Turning FastVLM off mid-session makes `scene_client` `None` for the **next** Run; a stuck prior run still needs STOP (or the force-clear).
 
 ## 0.2.6
 

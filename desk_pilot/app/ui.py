@@ -15,6 +15,7 @@ from desk_pilot import APP_NAME, DEFAULT_MAX_STEPS, DEFAULT_MODEL
 from desk_pilot.agent.loop import AgentLoop, RunResult
 from desk_pilot.agent.guide import is_guide_goal
 from desk_pilot.app.config import Settings, load_settings, save_settings
+from desk_pilot.app.run_control import STOP_ABANDON_SECONDS, RunGate
 from desk_pilot.desktop import get_backend, is_windows
 from desk_pilot.llm.openrouter import OpenRouterClient
 
@@ -45,11 +46,12 @@ class DeskPilotApp(ctk.CTk):
         self.settings = load_settings()
         self.force_mock = force_mock
         self.backend = get_backend(force_mock=force_mock or not is_windows())
-        self._log_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+        self._log_queue: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._stop = threading.Event()
         self._continue = threading.Event()
         self._worker: threading.Thread | None = None
-        self._running = False
+        self._gate = RunGate()
+        self._abandon_job: Any = None
         self._guide_waiting = False
         self._testing_sketch = False
         self._overlay_jobs: queue.Queue[Any] = queue.Queue()
@@ -228,7 +230,7 @@ class DeskPilotApp(ctk.CTk):
         ).grid(row=10, column=0, sticky="w", padx=14, pady=(6, 0))
         ctk.CTkLabel(
             settings,
-            text="Default on. Loads apple/FastVLM-0.5B in a sidecar after this window appears. Uncheck to run UIA-only (Run enables immediately).",
+            text="Default on. Loads apple/FastVLM-0.5B in a sidecar after this window appears. Uncheck to run UIA-only (Run enables immediately). A stuck prior run still needs STOP — FastVLM off applies to the next Run.",
             text_color="#9aa3b2",
             wraplength=300,
             anchor="w",
@@ -351,6 +353,12 @@ class DeskPilotApp(ctk.CTk):
     def _on_fastvlm_toggle(self) -> None:
         self.settings = self._read_form()
         self._boot_vision()
+        if self._gate.running:
+            self._log(
+                "info",
+                "FastVLM change applies to the next Run. If this run is stuck, click STOP "
+                "(Run unlocks after a few seconds even if observe is blocked).",
+            )
 
     def _poll_vision(self) -> None:
         vision = self._vision
@@ -374,7 +382,7 @@ class DeskPilotApp(ctk.CTk):
         return not vision.is_ready()
 
     def _sync_run_button(self) -> None:
-        if self._running:
+        if self._gate.running:
             self.run_btn.configure(state="disabled")
             return
         if self._vision_blocks_run():
@@ -383,7 +391,7 @@ class DeskPilotApp(ctk.CTk):
             self.run_btn.configure(state="normal")
 
     def _on_run(self) -> None:
-        if self._running:
+        if self._gate.running:
             return
         if self._vision_blocks_run():
             self._log("info", "Waiting for the vision model… Run is disabled until FastVLM is ready.")
@@ -424,19 +432,20 @@ class DeskPilotApp(ctk.CTk):
                 self._log("info", "Run cancelled.")
                 return
         save_settings(self.settings)
-        self._stop.clear()
-        self._continue.clear()
-        self._running = True
+        self._cancel_abandon_job()
+        self._stop = threading.Event()
+        self._continue = threading.Event()
+        token = self._gate.begin()
         self._guide_waiting = False
         self.run_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.continue_btn.configure(state="disabled")
         self.goal_box.configure(state="disabled")
         self._log("info", "Starting agent loop…")
-        self._worker = threading.Thread(target=self._worker_run, args=(goal, key), daemon=True)
+        self._worker = threading.Thread(target=self._worker_run, args=(goal, key, token), daemon=True)
         self._worker.start()
 
-    def _worker_run(self, goal: str, key: str) -> None:
+    def _worker_run(self, goal: str, key: str, token: int) -> None:
         from desk_pilot.desktop.com import com_thread
 
         client = OpenRouterClient(
@@ -446,6 +455,7 @@ class DeskPilotApp(ctk.CTk):
         )
         try:
             with com_thread():
+                vision = self._vision
                 agent = AgentLoop(
                     backend=self.backend,
                     llm=client,
@@ -455,7 +465,7 @@ class DeskPilotApp(ctk.CTk):
                     force_guide=self.settings.guide_mode,
                     continue_event=self._continue,
                     on_guide_step=lambda text: self._log_queue.put(("_guide", text)),
-                    scene_client=self._vision.scene_client() if self._vision else None,
+                    scene_client=vision.scene_client() if vision else None,
                 )
                 result = agent.run(goal)
         except Exception as exc:  # noqa: BLE001
@@ -463,7 +473,7 @@ class DeskPilotApp(ctk.CTk):
             self._log_queue.put(("error", result.message))
         finally:
             client.close()
-        self._log_queue.put(("_finished", result.status + "\n" + result.message))
+        self._log_queue.put(("_finished", f"{token}\n{result.status}\n{result.message}"))
 
     def _on_test_sketch(self) -> None:
         if getattr(self, "_testing_sketch", False):
@@ -508,17 +518,50 @@ class DeskPilotApp(ctk.CTk):
         self._log_queue.put(("_test_sketch_done", ""))
 
     def _on_continue(self) -> None:
-        if not self._running or not self._guide_waiting:
+        if not self._gate.running or not self._guide_waiting:
             return
         self._continue.set()
         self._log("guide", "Continue — next step.")
 
     def _on_stop(self) -> None:
-        if not self._running:
+        if not self._gate.running:
             return
+        first = not self._stop.is_set()
         self._stop.set()
         self._continue.set()
-        self._log("stop", "Stop requested — waiting for the current model/tool call to finish.")
+        if not first:
+            return
+        self._log(
+            "stop",
+            f"Stop requested — waiting up to {STOP_ABANDON_SECONDS:g}s, then Run unlocks even if observe is stuck.",
+        )
+        try:
+            self._abandon_job = self.after(
+                int(STOP_ABANDON_SECONDS * 1000),
+                self._abandon_stuck_run,
+            )
+        except Exception:
+            self._abandon_stuck_run()
+
+    def _abandon_stuck_run(self) -> None:
+        self._abandon_job = None
+        worker = self._worker
+        alive = worker is not None and worker.is_alive()
+        if not self._gate.abandon_stuck(alive):
+            return
+        self._finish_ui(
+            "stopped\nStuck step abandoned — FastVLM observe was still blocked. Run is enabled again."
+        )
+
+    def _cancel_abandon_job(self) -> None:
+        job = self._abandon_job
+        self._abandon_job = None
+        if job is None:
+            return
+        try:
+            self.after_cancel(job)
+        except Exception:
+            pass
 
     def _set_guide_ui(self, instruction: str) -> None:
         text = (instruction or "").strip()
@@ -531,7 +574,8 @@ class DeskPilotApp(ctk.CTk):
             self.continue_btn.configure(state="disabled")
 
     def _finish_ui(self, payload: str) -> None:
-        self._running = False
+        self._cancel_abandon_job()
+        self._gate.running = False
         self._guide_waiting = False
         self.stop_btn.configure(state="disabled")
         self.continue_btn.configure(state="disabled")
@@ -579,7 +623,19 @@ class DeskPilotApp(ctk.CTk):
             while True:
                 kind, message = self._log_queue.get_nowait()
                 if kind == "_finished":
-                    self._finish_ui(message)
+                    token_s, sep, rest = message.partition("\n")
+                    if sep:
+                        try:
+                            token = int(token_s)
+                        except ValueError:
+                            token = self._gate.token
+                            rest = message
+                    else:
+                        token = self._gate.token
+                        rest = message
+                    if not self._gate.finish(token):
+                        continue
+                    self._finish_ui(rest)
                     continue
                 if kind == "_test_sketch_done":
                     self._testing_sketch = False

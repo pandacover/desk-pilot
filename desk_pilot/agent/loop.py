@@ -107,6 +107,9 @@ class AgentLoop:
             self._log("info", "Dry-run desktop: actions are simulated, not sent to the OS.")
 
         snapshot, scene = self._observe_pair()
+        if self._stopped():
+            self._clear_guide()
+            return RunResult("stopped", "Stopped by user.", 0, self.backend.dry_run)
         self._last_snapshot = snapshot
         self._last_scene = scene
         self._remember_target(snapshot)
@@ -255,6 +258,9 @@ class AgentLoop:
                 return RunResult("fail", msg, step, self.backend.dry_run)
 
             snapshot, scene = self._observe_pair()
+            if self._stopped():
+                self._clear_guide()
+                return RunResult("stopped", "Stopped by user.", step, self.backend.dry_run)
             self._last_snapshot = snapshot
             self._last_scene = scene
             self._remember_target(snapshot)
@@ -523,17 +529,17 @@ class AgentLoop:
         If the scene thread is still empty after ``scene_timeout``, fail-open to
         UIA-only. Do not start a second /scene — the sidecar serializes generate
         behind one lock, so a retry would hang until the first (still running)
-        inference finishes.
+        inference finishes. STOP skips a new infer and abandons the join wait.
         """
         from desk_pilot.vision.scene import empty_scene
 
+        want_scene = self._scene_enabled() and not self._stopped()
+        self._log("observe", "capturing scene…" if want_scene else "listing UI…")
         box: list[int] | None = None
         try:
             box = self.backend.focused_window_rect()
         except Exception:
             box = None
-        if self._scene_enabled():
-            self._log("observe", "capturing scene…")
         holder: dict[str, Any] = {}
 
         def run_scene() -> None:
@@ -541,18 +547,22 @@ class AgentLoop:
 
         worker: threading.Thread | None = None
         wait = max(0.05, float(self.scene_timeout))
-        if self._scene_enabled() and box:
+        if want_scene and box:
             worker = threading.Thread(target=run_scene, name="fastvlm-scene", daemon=True)
             worker.start()
         snapshot = self.backend.list_ui()
         if worker is not None:
-            worker.join(timeout=wait)
+            self._join_scene_worker(worker, wait)
             scene = holder.get("scene")
             if scene is None:
                 window = self._snapshot_window_name(snapshot)
-                self._log("observe", f"scene timed out after {wait:g}s; continuing with UIA")
-                scene = empty_scene(window=window, note="scene timed out; continuing with UIA")
-        elif self._scene_enabled():
+                if self._stopped():
+                    self._log("observe", "scene skipped (stop); continuing with UIA")
+                    scene = empty_scene(window=window, note="scene skipped (stop); continuing with UIA")
+                else:
+                    self._log("observe", f"scene timed out after {wait:g}s; continuing with UIA")
+                    scene = empty_scene(window=window, note="scene timed out; continuing with UIA")
+        elif want_scene and not self._stopped():
             scene = self._infer_scene(snapshot=snapshot, box=None)
         else:
             scene = None
@@ -562,6 +572,16 @@ class AgentLoop:
                 scene = dict(scene)
                 scene["window"] = title
         return snapshot, scene if isinstance(scene, dict) else None
+
+    def _join_scene_worker(self, worker: threading.Thread, wait: float) -> None:
+        deadline = time.monotonic() + wait
+        while worker.is_alive():
+            if self._stopped():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            worker.join(timeout=min(0.2, remaining))
 
     def _snapshot_window_name(self, snapshot: dict[str, Any] | None) -> str:
         window = snapshot.get("window") if isinstance(snapshot, dict) else None
@@ -574,7 +594,7 @@ class AgentLoop:
 
     def _infer_scene(self, *, snapshot: dict[str, Any] | None, box: list[int] | None) -> dict[str, Any] | None:
         client = self.scene_client
-        if client is None:
+        if client is None or self._stopped():
             return None
         from desk_pilot.vision.capture import capture_content_screenshot
         from desk_pilot.vision.scene import empty_scene

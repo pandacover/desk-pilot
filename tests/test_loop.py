@@ -491,6 +491,98 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("scene timed out", user_text)
         self.assertNotIn("too late", user_text)
 
+    def test_observe_logs_listing_ui_when_scene_off(self) -> None:
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]
+        )
+        AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=3,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        observe = [message for kind, message in logs if kind == "observe"]
+        self.assertTrue(observe)
+        self.assertIn("listing UI", observe[0])
+
+    def test_stop_before_observe_skips_scene(self) -> None:
+        import threading
+        import time
+
+        class SlowSceneClient:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def infer_scene(self, **kwargs: Any) -> dict[str, Any]:
+                self.calls += 1
+                time.sleep(8)
+                return {"elements": []}
+
+        stop = threading.Event()
+        stop.set()
+        client = SlowSceneClient()
+        logs: list[tuple[str, str]] = []
+        started = time.perf_counter()
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=ScriptedLLM([]),
+            max_steps=3,
+            scene_client=client,
+            scene_timeout=5,
+            stop_event=stop,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(client.calls, 0)
+        self.assertLess(elapsed, 1.0)
+        observe = [message for kind, message in logs if kind == "observe"]
+        self.assertTrue(observe)
+        self.assertIn("listing UI", observe[0])
+
+    def test_stop_during_observe_does_not_wait_full_timeout(self) -> None:
+        import threading
+        import time
+
+        class SlowSceneClient:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.started = threading.Event()
+
+            def infer_scene(self, **kwargs: Any) -> dict[str, Any]:
+                self.calls += 1
+                self.started.set()
+                time.sleep(8)
+                return {"elements": []}
+
+        stop = threading.Event()
+        client = SlowSceneClient()
+
+        def cancel() -> None:
+            client.started.wait(timeout=2)
+            stop.set()
+
+        threading.Thread(target=cancel, daemon=True).start()
+        logs: list[tuple[str, str]] = []
+        started = time.perf_counter()
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=ScriptedLLM([]),
+            max_steps=3,
+            scene_client=client,
+            scene_timeout=5,
+            stop_event=stop,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(result.status, "stopped")
+        self.assertEqual(client.calls, 1)
+        self.assertLess(elapsed, 2.0)
+        joined = "\n".join(message for kind, message in logs if kind == "observe")
+        self.assertIn("capturing scene", joined.lower())
+        self.assertIn("stop", joined.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

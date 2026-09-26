@@ -111,7 +111,9 @@ The loop **already executes every tool call in one model turn**, in order, then 
 
 ## Pull latest (0.2.7)
 
-CPU FastVLM observe no longer hangs after **Goal**. If scene inference exceeds ~25s, the loop skips it, logs `scene timed out; continuing with UIA`, and plans from the UIA tree. It does not start a second `/scene` behind the sidecar lock. **Run** should show `capturing scene…` right after the goal.
+CPU FastVLM observe no longer hangs after **Goal**. If scene inference exceeds ~25s, the loop skips it, logs `scene timed out; continuing with UIA`, and plans from the UIA tree. It does not start a second `/scene` behind the sidecar lock. The live log shows `capturing scene…` or `listing UI…` right after the goal.
+
+**STOP** unlocks **Run** even if observe is still blocked: after ~2.5s the UI abandons the stuck step. Unchecking FastVLM applies to the **next** Run (`scene_client` is None); if a prior run is hung, click STOP first.
 
 ```powershell
 git pull
@@ -289,7 +291,7 @@ COM STA on the agent worker thread (`CoInitialize` / empty `list_ui`) and `launc
 
 - Will **not** start a run without an API key.
 - Confirmation dialog before live control (can be turned off in Settings).
-- Oversized red **STOP** button; Esc requests stop after the current tool/LLM call.
+- Oversized red **STOP** button; Esc requests stop. If the agent is stuck in FastVLM observe, Run unlocks after a few seconds even if the worker is still blocked.
 - Stays inside the stated goal; the system prompt tells the model not to enter passwords or pay for things unless you asked.
 
 ## Tests
