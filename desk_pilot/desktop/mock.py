@@ -549,6 +549,9 @@ class MockDesktop(DesktopBackend):
                     return box
         return sketchable_rect((focused or {}).get("rect"))
 
+    def focused_window_name(self) -> str:
+        return str(self.window_title or "")
+
     def window_rect_by_title(self, title: str) -> list[int] | None:
         from desk_pilot.desktop.launch import window_match_score
         from desk_pilot.desktop.rects import sketchable_rect

@@ -23,6 +23,10 @@ class DesktopBackend(ABC):
         """Bounding rect of the focused top-level window, if known."""
         return None
 
+    def focused_window_name(self) -> str:
+        """Title of the focused top-level window, if known."""
+        return ""
+
     def window_rect_by_title(self, title: str) -> list[int] | None:
         """Bounding rect of an open window whose title matches ``title``."""
         return None

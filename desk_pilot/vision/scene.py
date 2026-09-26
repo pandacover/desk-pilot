@@ -12,14 +12,14 @@ MAX_NOTE = 160
 
 SCENE_PROMPT = (
     "Extract a compact UI scene from this screenshot of a Windows app or browser. "
-    "Return ONLY JSON (no markdown, no extra text) with this exact shape: "
-    '{"window":"...","region":{"x":X,"y":Y,"w":W,"h":H},"elements":['
-    '{"id":"img_0","label":"...","role":"button|link|image|input|text|icon|other",'
-    '"box":[left,top,right,bottom],"click":[cx,cy]}],"note":"optional short"}'
-    " The crop's top-left is screen (region.x, region.y); size is region.w x region.h. "
-    "box and click MUST be absolute screen pixels. Cap 12 salient elements "
-    "(buttons, links, images, inputs, icons, result tiles, context-menu items, "
-    "Save/Download). Skip tiny chrome noise."
+    "Reply with a single JSON object only — no markdown, no extra text. "
+    "Keys: window string; region with integer x y w h; elements array of at most 12 "
+    "salient items (buttons, links, images, inputs, icons, result tiles, "
+    "context-menu items, Save or Download). Each element needs id, label, "
+    "role (button, link, image, input, text, icon, or other), "
+    "box as left top right bottom, and click as cx cy. "
+    "Coordinates are absolute screen pixels. The crop origin is region x y. "
+    "Skip tiny chrome noise."
 )
 
 
@@ -65,6 +65,14 @@ def parse_scene_text(text: str, *, window: str = "", region: dict[str, int] | No
         note = (text or "").strip().replace("\n", " ")[:MAX_NOTE]
         return normalize_scene({}, window=window, region=region, note=note or "FastVLM returned no JSON")
     return normalize_scene(raw, window=window, region=region)
+
+
+def decode_preview(text: str, *, limit: int = 80) -> str:
+    """First N chars of a generate string, collapsed, for sidecar logs."""
+    blob = " ".join((text or "").split())
+    if len(blob) <= limit:
+        return blob
+    return blob[: limit - 1] + "…"
 
 
 def normalize_scene(

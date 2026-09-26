@@ -113,22 +113,20 @@ The loop **already executes every tool call in one model turn**, in order, then 
 
 ## Pull latest (0.2.9)
 
-Live CUDA 0.2.8 kept native 1024 (scenes no longer 0×0) but the step log went quiet during `/scene`, runs felt slow, and picture-save goals still missed — **left-click only**, no Save-dialog confirm.
-
-0.2.9 does **not** shrink encode. It heartbeats the UI log every ~2.5s while FastVLM (and the planner) are in flight, logs `elapsed_ms` + element count, refuses stacked `/scene` behind the sidecar lock, and adds general `click button=right` plus one cheap file check after Save.
+Live CUDA after 0.2.8: tower was **1024×1024** but every `/scene` was `elements=0` `FastVLM returned no JSON` in ~8s. That is an **empty generate**, not a 768 encode. 0.2.9 stops JSON early-stop from firing on the prompt, logs `n_new` + decode preview, heartbeats the UI log, and adds right-click save. Encode stays 1024.
 
 ```powershell
 git pull
 python -m desk_pilot
 ```
 
-Windows CUDA re-run (Helium, Google Images, “download a picture of a corgi” — or any visual-grid save):
+Windows CUDA re-run (Helium visual grid / corgi download):
 
-1. Chip: **Vision ready**. Encode stays `vision tower input 1024x1024` in `fastvlm-sidecar.log` (never 768).
-2. After Goal: `capturing scene…` then `scene still inferring… 3s` (etc.) — the log must not freeze until PLAN.
-3. When `/scene` returns: `scene: N elements · Xms` with N>0 on a normal Images grid. Timeout/empty is labeled, not silent. Fail-open to UIA is last resort only.
-4. Acts: `navigate` to Images, scene-click a tile (or `button=right` → **Save image as** → type a Downloads `.jpg` path → Save). One `save check:` line after confirm. Must **not** Ctrl+S the results page.
-5. `elapsed_ms` in the UI log should be in the same ballpark as sidecar `/scene end elapsed_ms=…` (CUDA often ~1–3s after warmup; first call slower). If a later observe says `sidecar busy; skipped stacked /scene`, that is the no-stack guard, not a hang.
+1. Only **one** Desk Pilot window and **one** sidecar. `fastvlm-sidecar.log` starts with `listening on http://127.0.0.1:8765 pid=…` **before** `loading apple/FastVLM`.
+2. Chip **Vision ready**. `vision tower input 1024x1024` (never 768 / 3072×0×0).
+3. After Goal: `capturing scene…` then `scene still inferring… Ns`. `/scene` lines include `generate n_new=… text='{…'`. `n_new` must be **> 0** and `elements` > 0 on a normal window. If empty, the note is `FastVLM returned no JSON (n_new=N)` plus a decode preview — not a silent blank.
+4. `/scene start window=` should be a real title, not `''`.
+5. Acts: `navigate` → scene-click a tile **or** `button=right` → Save image as → type a Downloads `.jpg` → Save. One `save check:`. Not Ctrl+S.
 
 ## Pull latest (0.2.8)
 

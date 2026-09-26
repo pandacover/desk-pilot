@@ -58,6 +58,17 @@ class SidecarManager:
             self._owned = False
             self._log("info", f"Reusing FastVLM sidecar at {self.url} ({existing.get('status')}).")
             return
+        # Port occupied by a dead/hung sidecar: kill the pidfile process, then bind.
+        if "unreachable" not in str(existing.get("error") or "").lower():
+            pass
+        try:
+            from desk_pilot.app.instance import kill_stale_sidecar
+
+            killed = kill_stale_sidecar()
+            if killed:
+                self._log("info", f"Stopped stale FastVLM sidecar pid {killed}.")
+        except Exception:
+            pass
         cmd = [
             sys.executable,
             "-m",

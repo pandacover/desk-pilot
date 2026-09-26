@@ -980,6 +980,21 @@ class WindowsDesktop(DesktopBackend):
             return None
         return sketchable_rect(_rect_list(getattr(window, "BoundingRectangle", None)))
 
+    def focused_window_name(self) -> str:
+        prep = self._prepare()
+        if prep:
+            return ""
+        try:
+            window = self.auto.GetForegroundControl()
+        except Exception:
+            return ""
+        if window is None:
+            return ""
+        try:
+            return str(window.Name or "")
+        except Exception:
+            return ""
+
     def window_rect_by_title(self, title: str) -> list[int] | None:
         from desk_pilot.desktop.launch import is_agent_window, window_match_score
         from desk_pilot.desktop.rects import sketchable_rect
