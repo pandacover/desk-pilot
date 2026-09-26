@@ -52,6 +52,7 @@ class Settings:
     reasoning_effort: str = "low"
     confirm_before_run: bool = True
     guide_mode: bool = False
+    fastvlm_enabled: bool = True
 
     def masked_key(self) -> str:
         key = self.effective_api_key()
@@ -70,6 +71,20 @@ class Settings:
     def key_from_env(self) -> bool:
         return bool((os.environ.get("OPENROUTER_API_KEY") or "").strip())
 
+    def fastvlm_from_env(self) -> bool | None:
+        text = (os.environ.get("DESK_PILOT_FASTVLM") or "").strip().lower()
+        if text in {"0", "false", "no", "off"}:
+            return False
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        return None
+
+    def effective_fastvlm(self) -> bool:
+        env = self.fastvlm_from_env()
+        if env is not None:
+            return env
+        return bool(self.fastvlm_enabled)
+
     def to_disk_dict(self) -> dict:
         return {
             "openrouter_api_key": self.openrouter_api_key,
@@ -78,6 +93,7 @@ class Settings:
             "reasoning_effort": self.reasoning_effort or "low",
             "confirm_before_run": bool(self.confirm_before_run),
             "guide_mode": bool(self.guide_mode),
+            "fastvlm_enabled": bool(self.fastvlm_enabled),
         }
 
 
@@ -107,6 +123,7 @@ def load_settings(path: Path | None = None) -> Settings:
         reasoning_effort=effort,
         confirm_before_run=_as_bool(data.get("confirm_before_run"), True),
         guide_mode=_as_bool(data.get("guide_mode"), False),
+        fastvlm_enabled=_as_bool(data.get("fastvlm_enabled"), True),
     )
 
 

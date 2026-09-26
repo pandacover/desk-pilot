@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 
 from desk_pilot import APP_NAME, DEFAULT_MAX_STEPS, DEFAULT_MODEL, __version__
 from desk_pilot.app.config import load_settings
@@ -19,6 +20,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", type=str, help="OpenRouter model id (default openai/gpt-6-luna).")
     parser.add_argument("--max-steps", type=int, dest="max_steps", help="Hard step budget (default 30).")
     parser.add_argument("--guide", action="store_true", help="Force guide / how-to mode (you act; the agent sketches).")
+    parser.add_argument(
+        "--no-fastvlm",
+        action="store_true",
+        help="Skip the FastVLM sidecar; observe is UIA only.",
+    )
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {__version__}")
     return parser
 
@@ -69,6 +75,30 @@ def _run_cli(args: argparse.Namespace, *, force_mock: bool) -> int:
         return "continue"
 
     from desk_pilot.desktop.com import com_thread
+    from desk_pilot.vision.manager import SidecarManager
+
+    vision = SidecarManager(
+        enabled=settings.effective_fastvlm() and not bool(args.no_fastvlm),
+        stub=bool(force_mock) or backend.dry_run,
+        on_log=log,
+    )
+    vision.start()
+    if vision.enabled:
+        deadline = time.time() + (8 if vision.stub else 300)
+        while time.time() < deadline and not vision.is_ready():
+            health = vision.poll()
+            if health.get("status") == "error":
+                break
+            time.sleep(0.4)
+        if not vision.is_ready():
+            print(
+                "FastVLM sidecar is not ready. Wait for the model to load, "
+                "install requirements-vision.txt, or pass --no-fastvlm.",
+                file=sys.stderr,
+            )
+            vision.stop()
+            client.close()
+            return 2
 
     try:
         with com_thread():
@@ -79,9 +109,11 @@ def _run_cli(args: argparse.Namespace, *, force_mock: bool) -> int:
                 on_log=log,
                 force_guide=force_guide,
                 await_step=await_step,
+                scene_client=vision.scene_client(),
             ).run(goal)
     finally:
         client.close()
+        vision.stop()
         try:
             from desk_pilot.desktop.overlay import close_overlay
 

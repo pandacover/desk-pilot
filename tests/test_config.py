@@ -17,6 +17,7 @@ class ConfigTests(unittest.TestCase):
                 max_steps=12,
                 reasoning_effort="low",
                 guide_mode=True,
+                fastvlm_enabled=True,
             )
             save_settings(original, path)
             loaded = load_settings(path)
@@ -24,6 +25,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(loaded.model, "openai/gpt-6-luna")
             self.assertEqual(loaded.max_steps, 12)
             self.assertTrue(loaded.guide_mode)
+            self.assertTrue(loaded.fastvlm_enabled)
             raw = path.read_text(encoding="utf-8")
             self.assertIn("openrouter_api_key", json.loads(raw))
 
@@ -61,6 +63,7 @@ class ConfigTests(unittest.TestCase):
             path.write_text('{"openrouter_api_key":"","model":"openai/gpt-6-luna","max_steps":30}\n', encoding="utf-8")
             loaded = load_settings(path)
             self.assertFalse(loaded.guide_mode)
+            self.assertTrue(loaded.fastvlm_enabled)
 
 
 if __name__ == "__main__":

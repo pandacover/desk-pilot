@@ -13,8 +13,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "description": (
                 "Return a compact UI Automation tree for the focused window "
                 "(name, type, automation_id, bounding rect, short path). "
-                "Prefer this over screenshots except on a canvas / thin browser tree "
-                "(tldraw, Figma, Paint) where UIA cannot see strokes."
+                "Observe already includes FastVLM scene JSON for visual/thin trees."
             ),
             "parameters": {
                 "type": "object",
@@ -151,8 +150,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "function": {
             "name": "screenshot_region",
             "description": (
-                "Capture a small screen region with mss. Use when list_ui cannot find a control, "
-                "and freely in canvas mode (tldraw/Figma/thin browser tree)."
+                "Capture a small screen region with mss to disk. Last resort: observe already "
+                "includes FastVLM scene JSON (boxes + click centers). This does not send pixels "
+                "to the planner."
             ),
             "parameters": {
                 "type": "object",
@@ -311,7 +311,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "verify_file",
             "description": (
                 "Check a saved path on disk. For image downloads, rejects HTML masquerading "
-                "as .jpg/.png (magic bytes / size). Call this after a purported image save."
+                "as .jpg/.png (magic bytes / size). Optional — do not call every step."
             ),
             "parameters": {
                 "type": "object",

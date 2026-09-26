@@ -53,6 +53,7 @@ class DeskPilotApp(ctk.CTk):
         self._guide_waiting = False
         self._testing_sketch = False
         self._overlay_jobs: queue.Queue[Any] = queue.Queue()
+        self._vision = None
 
         self._build()
         self._bind_keys()
@@ -60,6 +61,8 @@ class DeskPilotApp(ctk.CTk):
         self.after(120, self._drain_logs)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_status()
+        # Sidecar starts after the window is shown so FastVLM load never blocks first paint.
+        self.after(80, self._boot_vision)
 
     def _build(self) -> None:
         self.grid_columnconfigure(0, weight=3)
@@ -85,7 +88,7 @@ class DeskPilotApp(ctk.CTk):
         self.status_chip.grid(row=0, column=1, sticky="e")
         ctk.CTkLabel(
             header,
-            text="Local agent: UI Automation → OpenRouter → click/type → verify. Paste your key, then run a goal.",
+            text="Local agent: UIA + FastVLM scene → OpenRouter → click/type. Vision loads in the background after this window opens.",
             text_color="#9aa3b2",
             anchor="w",
             wraplength=720,
@@ -216,12 +219,28 @@ class DeskPilotApp(ctk.CTk):
             variable=self.guide_var,
         ).grid(row=9, column=0, sticky="w", padx=14, pady=(6, 0))
 
+        self.fastvlm_var = tk.BooleanVar(value=self.settings.fastvlm_enabled)
+        ctk.CTkCheckBox(
+            settings,
+            text="FastVLM scene observe (local sidecar)",
+            variable=self.fastvlm_var,
+            command=self._on_fastvlm_toggle,
+        ).grid(row=10, column=0, sticky="w", padx=14, pady=(6, 0))
+        ctk.CTkLabel(
+            settings,
+            text="Default on. Loads apple/FastVLM-0.5B in a sidecar after this window appears. Uncheck to run UIA-only (Run enables immediately).",
+            text_color="#9aa3b2",
+            wraplength=300,
+            anchor="w",
+            justify="left",
+        ).grid(row=11, column=0, sticky="w", padx=14, pady=(2, 0))
+
         self.test_sketch_btn = ctk.CTkButton(
             settings,
             text="Test sketch",
             command=self._on_test_sketch,
         )
-        self.test_sketch_btn.grid(row=10, column=0, sticky="ew", padx=14, pady=(10, 0))
+        self.test_sketch_btn.grid(row=12, column=0, sticky="ew", padx=14, pady=(10, 0))
         ctk.CTkLabel(
             settings,
             text="Draws a fixed rectangle on the desktop for 2 seconds. Use this to tell Win32 overlay apart from agent targeting.",
@@ -229,10 +248,10 @@ class DeskPilotApp(ctk.CTk):
             wraplength=300,
             anchor="w",
             justify="left",
-        ).grid(row=11, column=0, sticky="w", padx=14, pady=(4, 0))
+        ).grid(row=13, column=0, sticky="w", padx=14, pady=(4, 0))
 
         ctk.CTkButton(settings, text="Save settings", command=self._save_settings).grid(
-            row=12, column=0, sticky="ew", padx=14, pady=(12, 14)
+            row=14, column=0, sticky="ew", padx=14, pady=(12, 14)
         )
 
         log_frame = ctk.CTkFrame(self)
@@ -244,7 +263,7 @@ class DeskPilotApp(ctk.CTk):
         )
         self.log = ctk.CTkTextbox(log_frame, font=ctk.CTkFont(family="Consolas", size=13), wrap="word")
         self.log.grid(row=1, column=0, sticky="nsew", padx=14, pady=(0, 14))
-        self.log.insert("end", "Ready. Paste an OpenRouter key, then Run.\n")
+        self.log.insert("end", "Ready. Vision model loads in the background. Paste an OpenRouter key, then Run.\n")
         self.log.configure(state="disabled")
         inner = getattr(self.log, "_textbox", None)
         if inner is not None:
@@ -264,7 +283,12 @@ class DeskPilotApp(ctk.CTk):
         key = self._effective_key()
         mode = "DRY-RUN" if dry else "WINDOWS"
         key_state = "key set" if key else "no API key"
-        self.status_chip.configure(text=f"  {mode}  ·  {key_state}  ")
+        vision = "Vision off"
+        if self._vision is not None:
+            vision = self._vision.status_label()
+        elif self.settings.effective_fastvlm():
+            vision = "Loading vision model…"
+        self.status_chip.configure(text=f"  {mode}  ·  {key_state}  ·  {vision}  ")
         if self.settings.key_from_env():
             self.env_hint.configure(
                 text="Using OPENROUTER_API_KEY from the environment (overrides the saved key)."
@@ -273,6 +297,7 @@ class DeskPilotApp(ctk.CTk):
             self.env_hint.configure(
                 text="Saved on this PC only. Env OPENROUTER_API_KEY overrides this field."
             )
+        self._sync_run_button()
 
     def _read_form(self) -> Settings:
         try:
@@ -287,6 +312,7 @@ class DeskPilotApp(ctk.CTk):
             reasoning_effort=self.settings.reasoning_effort or "low",
             confirm_before_run=bool(self.confirm_var.get()),
             guide_mode=bool(self.guide_var.get()),
+            fastvlm_enabled=bool(self.fastvlm_var.get()),
         )
 
     def _save_settings(self) -> None:
@@ -294,13 +320,73 @@ class DeskPilotApp(ctk.CTk):
         path = save_settings(self.settings)
         self._log("info", f"Saved settings to {path}")
         self._refresh_status()
+        self._boot_vision()
 
     def _effective_key(self) -> str:
         self.settings.openrouter_api_key = self.key_var.get().strip()
         return self.settings.effective_api_key()
 
+    def _boot_vision(self) -> None:
+        from desk_pilot.vision.manager import SidecarManager
+
+        enabled = self.settings.effective_fastvlm()
+        stub = bool(self.backend.dry_run)
+        current = self._vision
+        if current is not None and current.enabled == enabled and current.stub == stub:
+            current.poll()
+            self._refresh_status()
+            return
+        if current is not None:
+            current.stop()
+            self._vision = None
+        manager = SidecarManager(
+            enabled=enabled,
+            stub=stub,
+            on_log=lambda kind, msg: self._log_queue.put((kind, msg)),
+        )
+        self._vision = manager
+        manager.start()
+        self._poll_vision()
+
+    def _on_fastvlm_toggle(self) -> None:
+        self.settings = self._read_form()
+        self._boot_vision()
+
+    def _poll_vision(self) -> None:
+        vision = self._vision
+        if vision is None:
+            return
+        vision.poll()
+        self._refresh_status()
+        if not vision.enabled or vision.is_ready():
+            return
+        died = vision._owned and vision.process is not None and vision.process.poll() is not None
+        if died:
+            return
+        self.after(400, self._poll_vision)
+
+    def _vision_blocks_run(self) -> bool:
+        if not self.settings.effective_fastvlm():
+            return False
+        vision = self._vision
+        if vision is None:
+            return True
+        return not vision.is_ready()
+
+    def _sync_run_button(self) -> None:
+        if self._running:
+            self.run_btn.configure(state="disabled")
+            return
+        if self._vision_blocks_run():
+            self.run_btn.configure(state="disabled")
+        else:
+            self.run_btn.configure(state="normal")
+
     def _on_run(self) -> None:
         if self._running:
+            return
+        if self._vision_blocks_run():
+            self._log("info", "Waiting for the vision model… Run is disabled until FastVLM is ready.")
             return
         self.settings = self._read_form()
         key = self.settings.effective_api_key()
@@ -369,6 +455,7 @@ class DeskPilotApp(ctk.CTk):
                     force_guide=self.settings.guide_mode,
                     continue_event=self._continue,
                     on_guide_step=lambda text: self._log_queue.put(("_guide", text)),
+                    scene_client=self._vision.scene_client() if self._vision else None,
                 )
                 result = agent.run(goal)
         except Exception as exc:  # noqa: BLE001
@@ -446,7 +533,6 @@ class DeskPilotApp(ctk.CTk):
     def _finish_ui(self, payload: str) -> None:
         self._running = False
         self._guide_waiting = False
-        self.run_btn.configure(state="normal")
         self.stop_btn.configure(state="disabled")
         self.continue_btn.configure(state="disabled")
         self.guide_hint.configure(text="")
@@ -524,6 +610,11 @@ class DeskPilotApp(ctk.CTk):
 
     def _on_close(self) -> None:
         self._stop.set()
+        try:
+            if self._vision is not None:
+                self._vision.stop()
+        except Exception:
+            pass
         try:
             from desk_pilot.desktop.overlay import close_overlay, set_overlay_pump
 
