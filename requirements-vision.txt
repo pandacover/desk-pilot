@@ -1,6 +1,9 @@
 # Optional FastVLM sidecar (separate process — the Desk Pilot UI never imports torch).
-# CPU is OK; first load of apple/FastVLM-0.5B is slow and downloads ~1GB from Hugging Face.
-# CUDA speeds up POST /scene when a GPU is present.
+# CPU is OK. apple/FastVLM-0.5B first load is slow (~1GB download). After load:
+#   CUDA: typically ~1–3s per POST /scene (768px crop, greedy, ≤192 new tokens).
+#   CPU:  typically ~5–15s after warmup (512px crop); first generate is slower.
+# The sidecar logs /scene start/end elapsed_ms to fastvlm-sidecar.log.
+# Optional CUDA 8-bit: DESK_PILOT_FASTVLM_8BIT=1 (needs bitsandbytes; often fails on Windows).
 #
 #   pip install -r requirements-vision.txt
 #   python -m desk_pilot.vision.sidecar          # GET /health, POST /scene on 127.0.0.1:8765

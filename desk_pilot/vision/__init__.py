@@ -8,6 +8,12 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_MODEL_ID = "apple/FastVLM-0.5B"
 MAX_ELEMENTS = 20
+# FastVLM-0.5B native crop is 1024²; shrinking before encode is the CPU win.
+SCENE_MAX_EDGE = 768
+SCENE_MAX_EDGE_CPU = 512
+# Compact scene JSON is small. Official HF snippet uses 128; we were at 512 (minutes on CPU).
+SCENE_MAX_NEW_TOKENS = 192
+HEALTH_STATUSES = ("loading", "ready", "busy", "error")
 
 _MISSING_PKG_RES = (
     re.compile(r"pip install ([A-Za-z0-9_.\-]+)"),

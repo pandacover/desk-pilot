@@ -3,7 +3,7 @@
 Run:  python -m desk_pilot.vision.sidecar
       python -m desk_pilot.vision.sidecar --stub   # no torch; empty scenes for dry-run/CI
 
-GET  /health  → {"status":"loading"|"ready"|"error", "mode":"fastvlm"|"stub", "device":...}
+GET  /health  → {"status":"loading"|"ready"|"busy"|"error", "phase":..., "mode":..., "device":...}
 POST /scene   JSON {path|image_b64, window, region} → compact scene JSON
 """
 
@@ -15,35 +15,51 @@ import json
 import os
 import sys
 import threading
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from desk_pilot.vision import DEFAULT_HOST, DEFAULT_MODEL_ID, DEFAULT_PORT, missing_package_name
-from desk_pilot.vision.scene import SCENE_PROMPT, empty_scene, parse_scene_text
+from desk_pilot.vision import (
+    DEFAULT_HOST,
+    DEFAULT_MODEL_ID,
+    DEFAULT_PORT,
+    HEALTH_STATUSES,
+    SCENE_MAX_EDGE,
+    SCENE_MAX_EDGE_CPU,
+    SCENE_MAX_NEW_TOKENS,
+    missing_package_name,
+)
+from desk_pilot.vision.capture import fit_max_edge
+from desk_pilot.vision.scene import SCENE_PROMPT, empty_scene, json_object_complete, parse_scene_text
 
 IMAGE_TOKEN_INDEX = -200
 
 _state_lock = threading.Lock()
 _infer_lock = threading.Lock()
 _status = "loading"
+_phase = "loading_weights"
 _mode = "fastvlm"
 _device: str | None = None
 _error: str | None = None
 _note: str | None = None
 _model = None
 _tokenizer = None
+_max_edge = SCENE_MAX_EDGE
 
 
 def health_payload() -> dict[str, Any]:
     with _state_lock:
         payload: dict[str, Any] = {
             "status": _status,
+            "phase": _phase,
             "mode": _mode,
             "device": _device,
             "model": DEFAULT_MODEL_ID if _mode == "fastvlm" else None,
+            "max_edge": _max_edge,
+            "max_new_tokens": SCENE_MAX_NEW_TOKENS,
         }
         if _error:
             payload["error"] = _error
@@ -55,15 +71,18 @@ def health_payload() -> dict[str, Any]:
 def set_state(
     *,
     status: str | None = None,
+    phase: str | None = None,
     mode: str | None = None,
     device: str | None = None,
     error: str | None = None,
     note: str | None = None,
 ) -> None:
-    global _status, _mode, _device, _error, _note
+    global _status, _phase, _mode, _device, _error, _note
     with _state_lock:
         if status is not None:
-            _status = status
+            _status = status if status in HEALTH_STATUSES else "error"
+        if phase is not None:
+            _phase = phase
         if mode is not None:
             _mode = mode
         if device is not None:
@@ -76,7 +95,7 @@ def set_state(
 
 def load_model() -> None:
     """Import torch only in this sidecar process, after HTTP is already serving /health."""
-    global _model, _tokenizer
+    global _model, _tokenizer, _max_edge
     try:
         import torch
         from PIL import Image  # noqa: F401 — fail fast if pillow missing
@@ -84,52 +103,107 @@ def load_model() -> None:
     except Exception as exc:  # noqa: BLE001
         set_state(
             status="error",
+            phase="",
             mode="fastvlm",
             error=_short_exc(exc, prefix="FastVLM deps missing"),
-            note="UI stays up; uncheck FastVLM in Settings or: pip install -r requirements-vision.txt",
+            note="UI stays up; pip install -r requirements-vision.txt, then restart.",
         )
         return
     try:
         cuda = bool(torch.cuda.is_available())
         device = "cuda" if cuda else "cpu"
         dtype = torch.float16 if cuda else torch.float32
+        _max_edge = SCENE_MAX_EDGE if cuda else SCENE_MAX_EDGE_CPU
+        _configure_torch(torch, cuda=cuda)
         set_state(
             status="loading",
+            phase="loading_weights",
             mode="fastvlm",
             device=device,
-            note=None if cuda else "CPU is OK; first load is slow.",
+            note=None if cuda else "CPU is OK; first load is slow. /scene uses a 512px crop.",
         )
+        sidecar_log(f"loading {DEFAULT_MODEL_ID} device={device} dtype={dtype} max_edge={_max_edge}")
         tokenizer = AutoTokenizer.from_pretrained(DEFAULT_MODEL_ID, trust_remote_code=True)
         kwargs: dict[str, Any] = {
             "torch_dtype": dtype,
             "trust_remote_code": True,
+            "low_cpu_mem_usage": True,
         }
-        if cuda:
+        quant = _quant_load_kwargs(cuda)
+        kwargs.update(quant)
+        if "load_in_8bit" in kwargs or "load_in_4bit" in kwargs:
+            kwargs.pop("torch_dtype", None)
+        if cuda and "load_in_8bit" not in kwargs and "load_in_4bit" not in kwargs:
             kwargs["device_map"] = "auto"
         model = AutoModelForCausalLM.from_pretrained(DEFAULT_MODEL_ID, **kwargs)
-        if not cuda:
+        if not cuda and "load_in_8bit" not in kwargs:
             model = model.to("cpu")
         model.eval()
+        if hasattr(model, "config"):
+            try:
+                model.config.use_cache = True
+            except Exception:
+                pass
         _tokenizer = tokenizer
         _model = model
+        quant_note = " 8-bit" if "load_in_8bit" in kwargs else (" 4-bit" if "load_in_4bit" in kwargs else "")
         set_state(
             status="ready",
+            phase="",
             mode="fastvlm",
             device=device,
             error="",
-            note=None if cuda else "CPU inference; first load is slow.",
+            note=(
+                None
+                if cuda
+                else f"CPU inference at {_max_edge}px / {SCENE_MAX_NEW_TOKENS} tokens (greedy)."
+            ),
+        )
+        sidecar_log(
+            f"ready device={device}{quant_note} max_edge={_max_edge} max_new_tokens={SCENE_MAX_NEW_TOKENS}"
         )
     except Exception as exc:  # noqa: BLE001
         set_state(
             status="error",
+            phase="",
             mode="fastvlm",
             error=_short_exc(exc, prefix="FastVLM load failed"),
             note=traceback.format_exc()[-400:],
         )
 
 
+def _configure_torch(torch: Any, *, cuda: bool) -> None:
+    if cuda:
+        return
+    try:
+        n = os.cpu_count() or 4
+        torch.set_num_threads(max(1, min(8, n)))
+        torch.set_num_interop_threads(1)
+    except Exception:
+        pass
+
+
+def _quant_load_kwargs(cuda: bool) -> dict[str, Any]:
+    """Optional bitsandbytes 8-bit on CUDA. Off unless DESK_PILOT_FASTVLM_8BIT=1 (Windows can fail)."""
+    flag = (os.environ.get("DESK_PILOT_FASTVLM_8BIT") or "").strip().lower()
+    if flag not in {"1", "true", "yes", "on"} or not cuda:
+        return {}
+    try:
+        import bitsandbytes  # noqa: F401
+    except Exception as exc:  # noqa: BLE001
+        sidecar_log(f"8-bit skipped (bitsandbytes: {exc})")
+        return {}
+    sidecar_log("loading with bitsandbytes 8-bit")
+    return {"load_in_8bit": True, "device_map": "auto"}
+
+
 def enter_stub(reason: str = "stub mode") -> None:
-    set_state(status="ready", mode="stub", device=None, error="", note=reason)
+    set_state(status="ready", phase="", mode="stub", device=None, error="", note=reason)
+
+
+def sidecar_log(message: str) -> None:
+    sys.stderr.write(f"fastvlm-sidecar: {message}\n")
+    sys.stderr.flush()
 
 
 def infer_scene(path: str | None, image_bytes: bytes | None, window: str, region: dict[str, int]) -> dict[str, Any]:
@@ -138,19 +212,21 @@ def infer_scene(path: str | None, image_bytes: bytes | None, window: str, region
         status = _status
         model = _model
         tokenizer = _tokenizer
-    if status != "ready":
+        max_edge = _max_edge
+    if status not in {"ready", "busy"}:
         return empty_scene(window=window, region=region, note=f"sidecar not ready ({status})")
     if mode == "stub" or model is None or tokenizer is None:
         return empty_scene(window=window, region=region, note="stub: FastVLM not loaded")
     image = _open_image(path, image_bytes)
     if image is None:
         return empty_scene(window=window, region=region, note="could not open screenshot")
+    image = fit_max_edge(image, max_edge)
     prompt = (
         f"{SCENE_PROMPT} region={json.dumps(region, separators=(',', ':'))} "
         f"window={window or '?'}"
     )
     try:
-        text = _generate(model, tokenizer, image, prompt)
+        text = _generate(model, tokenizer, image, prompt, max_edge=max_edge)
     except Exception as exc:  # noqa: BLE001
         return empty_scene(window=window, region=region, note=f"FastVLM generate failed: {exc}")
     return parse_scene_text(text, window=window, region=region)
@@ -168,7 +244,7 @@ def _open_image(path: str | None, image_bytes: bytes | None):
     return None
 
 
-def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
+def _generate(model: Any, tokenizer: Any, image: Any, prompt: str, *, max_edge: int) -> str:
     import torch
 
     messages = [{"role": "user", "content": f"<image>\n{prompt}"}]
@@ -181,23 +257,85 @@ def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
     img_tok = torch.tensor([[IMAGE_TOKEN_INDEX]], dtype=pre_ids.dtype)
     input_ids = torch.cat([pre_ids, img_tok, post_ids], dim=1).to(model.device)
     attention_mask = torch.ones_like(input_ids, device=model.device)
-    px = model.get_vision_tower().image_processor(images=image, return_tensors="pt")["pixel_values"]
-    px = px.to(model.device, dtype=model.dtype)
-    with torch.no_grad():
-        out = model.generate(
-            inputs=input_ids,
-            attention_mask=attention_mask,
-            images=px,
-            max_new_tokens=512,
-            do_sample=False,
-        )
-    decoded = tokenizer.decode(out[0], skip_special_tokens=True)
+    px = _pixel_values(model, image, max_edge=max_edge)
+    px = px.to(model.device, dtype=getattr(model, "dtype", px.dtype))
+    stopping = _json_stopping(tokenizer, int(input_ids.shape[-1]))
+    gen_kwargs: dict[str, Any] = {
+        "inputs": input_ids,
+        "attention_mask": attention_mask,
+        "images": px,
+        "max_new_tokens": SCENE_MAX_NEW_TOKENS,
+        "do_sample": False,
+        "use_cache": True,
+    }
+    pad = getattr(tokenizer, "eos_token_id", None) or getattr(tokenizer, "pad_token_id", None)
+    if pad is not None:
+        gen_kwargs["pad_token_id"] = pad
+    if stopping is not None:
+        gen_kwargs["stopping_criteria"] = stopping
+    inference = getattr(torch, "inference_mode", torch.no_grad)
+    with inference():
+        out = model.generate(**gen_kwargs)
+    new_tokens = out[0, input_ids.shape[-1] :]
+    decoded = tokenizer.decode(new_tokens, skip_special_tokens=True)
     return str(decoded or "")
+
+
+def _pixel_values(model: Any, image: Any, *, max_edge: int) -> Any:
+    import torch.nn.functional as F
+
+    processor = model.get_vision_tower().image_processor
+    px = None
+    try:
+        px = processor(
+            images=image,
+            return_tensors="pt",
+            size={"shortest_edge": max_edge},
+            crop_size={"height": max_edge, "width": max_edge},
+        )["pixel_values"]
+    except TypeError:
+        px = processor(images=image, return_tensors="pt")["pixel_values"]
+    if px is None:
+        raise RuntimeError("vision tower returned no pixel_values")
+    if px.ndim == 5 and px.shape[1] > 1:
+        # Any-res tiling: re-encode a fitted square so CPU does not run N vision passes.
+        square = fit_max_edge(image, max_edge)
+        px = processor(images=square, return_tensors="pt")["pixel_values"]
+    if px.ndim == 4:
+        height, width = int(px.shape[-2]), int(px.shape[-1])
+        longest = max(height, width)
+        if longest > max_edge:
+            scale = max_edge / float(longest)
+            nh = max(1, int(round(height * scale)))
+            nw = max(1, int(round(width * scale)))
+            px = F.interpolate(px, size=(nh, nw), mode="bilinear", align_corners=False)
+    return px
+
+
+def _json_stopping(tokenizer: Any, prompt_len: int) -> Any | None:
+    try:
+        from transformers import StoppingCriteria, StoppingCriteriaList
+    except Exception:
+        return None
+
+    class _JsonDone(StoppingCriteria):
+        def __init__(self) -> None:
+            self._prompt_len = prompt_len
+            self._tok = tokenizer
+
+        def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+            gen = input_ids[0, self._prompt_len :]
+            if int(gen.shape[-1]) < 8:
+                return False
+            text = self._tok.decode(gen, skip_special_tokens=True)
+            return json_object_complete(text)
+
+    return StoppingCriteriaList([_JsonDone()])
 
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
-        sys.stderr.write("fastvlm-sidecar: " + (fmt % args) + "\n")
+        sidecar_log(fmt % args)
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path.split("?", 1)[0] != "/health":
@@ -212,8 +350,30 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(max(0, min(length, 8_000_000))) if length else b""
         path, image_bytes, window, region = _parse_scene_body(raw, self.headers.get("Content-Type") or "")
-        with _infer_lock:
-            scene = infer_scene(path, image_bytes, window, region)
+        started = time.perf_counter()
+        size = ""
+        try:
+            image = _open_image(path, image_bytes)
+            if image is not None:
+                size = f"{image.size[0]}x{image.size[1]}"
+        except Exception:
+            size = ""
+        sidecar_log(f"/scene start window={window!r} image={size or 'none'} max_edge={_max_edge}")
+        prev = health_payload().get("status")
+        if prev in {"ready", "busy"}:
+            set_state(status="busy", phase="inferring")
+        scene: dict[str, Any] = empty_scene(window=window, region=region, note="infer failed")
+        try:
+            with _infer_lock:
+                scene = infer_scene(path, image_bytes, window, region)
+        finally:
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            if health_payload().get("status") == "busy":
+                set_state(status="ready", phase="")
+            count = len((scene if isinstance(scene, dict) else {}).get("elements") or [])
+            note = str((scene or {}).get("note") or "")
+            extra = f" note={note[:80]!r}" if note else ""
+            sidecar_log(f"/scene end elapsed_ms={elapsed_ms} elements={count}{extra}")
         self._send(200, scene)
 
     def _send(self, code: int, payload: dict[str, Any]) -> None:
@@ -287,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
     if stub:
         enter_stub("stub: FastVLM weights not loaded")
     else:
-        set_state(status="loading", mode="fastvlm", note="Loading vision model…")
+        set_state(status="loading", phase="loading_weights", mode="fastvlm", note="Loading vision model…")
         threading.Thread(target=load_model, name="fastvlm-load", daemon=True).start()
     try:
         serve(args.host, int(args.port))

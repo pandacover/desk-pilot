@@ -483,7 +483,8 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(client.calls, 1)
         observe = "\n".join(message for kind, message in logs if kind == "observe")
         self.assertIn("capturing scene", observe.lower())
-        self.assertIn("timed out", observe.lower())
+        self.assertIn("last-resort", observe.lower())
+        self.assertIn("no second /scene", observe.lower())
         self.assertIn("continuing with UIA", observe)
         user_text = " ".join(
             str(m.get("content") or "") for payload in llm.payloads for m in payload if m.get("role") == "user"

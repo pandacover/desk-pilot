@@ -53,7 +53,7 @@ class SidecarManager:
             return
         self.client = SceneClient(self.url, timeout=SCENE_INFER_TIMEOUT)
         existing = self.client.health()
-        if existing.get("status") in {"loading", "ready"}:
+        if existing.get("status") in {"loading", "ready", "busy"}:
             self._last_health = existing
             self._owned = False
             self._log("info", f"Reusing FastVLM sidecar at {self.url} ({existing.get('status')}).")
@@ -129,18 +129,21 @@ class SidecarManager:
         return health
 
     def is_ready(self) -> bool:
-        return (self._last_health or {}).get("status") == "ready"
+        return (self._last_health or {}).get("status") in {"ready", "busy"}
 
     def status_label(self) -> str:
         if not self.enabled:
             return "Vision off"
         health = self._last_health or {}
         status = health.get("status") or "error"
-        if status == "loading":
+        phase = str(health.get("phase") or "")
+        if status == "loading" or phase == "loading_weights":
             device = health.get("device") or ""
             if device == "cpu":
                 return "Loading vision model (CPU, first load is slow)…"
             return "Loading vision model…"
+        if status == "busy" or phase == "inferring":
+            return "Vision inferring…"
         if status == "ready":
             if (health.get("mode") or "") == "stub":
                 return "Vision stub"

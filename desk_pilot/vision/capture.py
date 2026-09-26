@@ -7,6 +7,7 @@ from typing import Any
 
 from desk_pilot.agent.canvas import content_box, is_browser_or_whiteboard, window_rect_from_snapshot
 from desk_pilot.desktop.rects import sketchable_rect
+from desk_pilot.vision import SCENE_MAX_EDGE
 
 
 def region_from_box(box: list[int] | None) -> dict[str, int] | None:
@@ -41,7 +42,21 @@ def resolve_capture_box(backend: Any, snapshot: dict[str, Any] | None = None) ->
     return content_region(snapshot, box)
 
 
-def compress_screenshot(path: str | Path, *, max_edge: int = 1024, quality: int = 70) -> str:
+def fit_max_edge(image: Any, max_edge: int) -> Any:
+    """Downscale so the longer side is at most ``max_edge`` (no upscale)."""
+    edge = max(1, int(max_edge))
+    size = getattr(image, "size", None)
+    if not size or len(size) < 2:
+        return image
+    width, height = int(size[0]), int(size[1])
+    if max(width, height) <= edge:
+        return image
+    copy = image.copy()
+    copy.thumbnail((edge, edge))
+    return copy
+
+
+def compress_screenshot(path: str | Path, *, max_edge: int = SCENE_MAX_EDGE, quality: int = 70) -> str:
     """JPEG shrink for the sidecar. Falls back to the original path on failure."""
     src = Path(path)
     if not src.is_file():
@@ -51,8 +66,7 @@ def compress_screenshot(path: str | Path, *, max_edge: int = 1024, quality: int 
     except Exception:
         return str(src)
     try:
-        image = Image.open(src).convert("RGB")
-        image.thumbnail((max_edge, max_edge))
+        image = fit_max_edge(Image.open(src).convert("RGB"), max_edge)
         dest = src.with_name(src.stem + ".scene.jpg")
         image.save(dest, "JPEG", quality=max(40, min(int(quality), 90)), optimize=True)
         return str(dest)

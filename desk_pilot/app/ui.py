@@ -366,12 +366,14 @@ class DeskPilotApp(ctk.CTk):
             return
         vision.poll()
         self._refresh_status()
-        if not vision.enabled or vision.is_ready():
+        if not vision.enabled:
             return
         died = vision._owned and vision.process is not None and vision.process.poll() is not None
         if died:
             return
-        self.after(400, self._poll_vision)
+        status = str((vision._last_health or {}).get("status") or "")
+        delay = 400 if status in {"loading", "busy"} or self._gate.running else 1200
+        self.after(delay, self._poll_vision)
 
     def _vision_blocks_run(self) -> bool:
         if not self.settings.effective_fastvlm():

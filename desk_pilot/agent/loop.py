@@ -560,7 +560,7 @@ class AgentLoop:
                     self._log("observe", "scene skipped (stop); continuing with UIA")
                     scene = empty_scene(window=window, note="scene skipped (stop); continuing with UIA")
                 else:
-                    self._log("observe", f"scene timed out after {wait:g}s; continuing with UIA")
+                    self._log("observe", f"FastVLM last-resort skip after {wait:g}s; continuing with UIA (no second /scene)")
                     scene = empty_scene(window=window, note="scene timed out; continuing with UIA")
         elif want_scene and not self._stopped():
             scene = self._infer_scene(snapshot=snapshot, box=None)

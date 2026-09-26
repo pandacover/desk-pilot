@@ -10,8 +10,8 @@ import httpx
 from desk_pilot.vision import DEFAULT_HOST, DEFAULT_PORT
 from desk_pilot.vision.scene import empty_scene, normalize_scene
 
-# Agent-loop /scene wait. CPU FastVLM can exceed this; fail-open to UIA rather than hang.
-SCENE_INFER_TIMEOUT = 25.0
+# Last-resort agent wait if /scene never returns. Tuned FastVLM should finish sooner.
+SCENE_INFER_TIMEOUT = 40.0
 
 
 def default_sidecar_url() -> str:
@@ -45,13 +45,13 @@ class SceneClient:
         if not isinstance(data, dict):
             return {"status": "error", "error": "health returned non-object"}
         status = str(data.get("status") or "error")
-        if status not in {"loading", "ready", "error"}:
+        if status not in {"loading", "ready", "busy", "error"}:
             status = "error"
         data["status"] = status
         return data
 
     def is_ready(self) -> bool:
-        return self.health().get("status") == "ready"
+        return self.health().get("status") in {"ready", "busy"}
 
     def infer_scene(
         self,
