@@ -58,6 +58,14 @@ class SceneJsonTests(unittest.TestCase):
         self.assertEqual(scene["note"], "stub")
         self.assertEqual(scene["region"]["x"], 1)
 
+    def test_normalize_preserves_elapsed_ms(self) -> None:
+        scene = normalize_scene(
+            {"elements": [], "elapsed_ms": 1823, "note": "ok", "timed_out": False},
+            window="Helium",
+        )
+        self.assertEqual(scene["elapsed_ms"], 1823)
+        self.assertEqual(scene["elements"], [])
+
     def test_json_object_complete(self) -> None:
         from desk_pilot.vision.scene import json_object_complete
 
@@ -287,6 +295,13 @@ class HealthErrorChipTests(unittest.TestCase):
         self.assertGreaterEqual(SCENE_MIN_TOWER_EDGE, 1024)
         self.assertGreaterEqual(SCENE_MAX_NEW_TOKENS, 128)
         self.assertLessEqual(SCENE_MAX_NEW_TOKENS, 256)
+        from desk_pilot.vision import JSON_STOP_EVERY
+        from desk_pilot.vision.client import SCENE_HEARTBEAT
+
+        self.assertGreaterEqual(JSON_STOP_EVERY, 2)
+        self.assertLessEqual(JSON_STOP_EVERY, 8)
+        self.assertGreaterEqual(SCENE_HEARTBEAT, 2.0)
+        self.assertLessEqual(SCENE_HEARTBEAT, 3.5)
 
     def test_processor_crop_never_below_native(self) -> None:
         from types import SimpleNamespace
@@ -299,6 +314,17 @@ class HealthErrorChipTests(unittest.TestCase):
         )
         self.assertEqual(_processor_crop_edge(SimpleNamespace(crop_size={"height": 768, "width": 768})), 1024)
         self.assertEqual(_processor_crop_edge(SimpleNamespace()), 1024)
+
+    def test_infer_lock_does_not_stack(self) -> None:
+        from desk_pilot.vision.sidecar import _infer_lock
+
+        self.assertTrue(_infer_lock.acquire(blocking=False))
+        try:
+            self.assertFalse(_infer_lock.acquire(blocking=False))
+        finally:
+            _infer_lock.release()
+        self.assertTrue(_infer_lock.acquire(blocking=False))
+        _infer_lock.release()
 
     def test_health_busy_payload(self) -> None:
         from desk_pilot.vision.sidecar import enter_stub, health_payload, set_state

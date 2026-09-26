@@ -4,6 +4,8 @@ Local **Windows computer-use agent**. You type a goal, Desk Pilot reads the focu
 
 The app window opens immediately. FastVLM loads in a background sidecar after the UI is shown (status: **Loading vision model…**, then **Vision ready**). **Run** stays disabled until the sidecar reports ready, unless you turn FastVLM off in Settings.
 
+While FastVLM infers, the live step log heartbeats (`scene still inferring… Ns`) instead of going quiet. When `/scene` returns it logs `scene: N elements · elapsed_ms` (and **timed out** / **empty** if that happened). Sidecar file log remains `%LOCALAPPDATA%\DeskPilot\fastvlm-sidecar.log`.
+
 On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fake in-memory Windows session (Start, Run dialog, Notepad) so you can develop and CI without a Windows box. Dry-run uses a FastVLM **stub** sidecar (no PyTorch weights) so the window still opens instantly.
 
 ## Requirements
@@ -87,7 +89,7 @@ Tools the model can call:
 | Tool | Purpose |
 | --- | --- |
 | `list_ui` | Compact UIA tree: name, type, automation id, rect, short path |
-| `click` | By automation id, name, or coordinates |
+| `click` | By automation id, name, or coordinates. `button=left` (default), `right` (context menu), or `double` |
 | `drag` | Mouse-down → move → up (optional polyline). Auto mode only; for canvases |
 | `prepare_art` | Sketch/draw goals: PNG (OpenRouter image or geometric) + clipboard, else drag playbook |
 | `type_text` | Type into the focused or targeted control |
@@ -108,6 +110,25 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` → `done` with the full paths. Not Win+S, not Edge, not Explorer search.
 
 The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once (and refreshes the FastVLM scene). Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+
+## Pull latest (0.2.9)
+
+Live CUDA 0.2.8 kept native 1024 (scenes no longer 0×0) but the step log went quiet during `/scene`, runs felt slow, and picture-save goals still missed — **left-click only**, no Save-dialog confirm.
+
+0.2.9 does **not** shrink encode. It heartbeats the UI log every ~2.5s while FastVLM (and the planner) are in flight, logs `elapsed_ms` + element count, refuses stacked `/scene` behind the sidecar lock, and adds general `click button=right` plus one cheap file check after Save.
+
+```powershell
+git pull
+python -m desk_pilot
+```
+
+Windows CUDA re-run (Helium, Google Images, “download a picture of a corgi” — or any visual-grid save):
+
+1. Chip: **Vision ready**. Encode stays `vision tower input 1024x1024` in `fastvlm-sidecar.log` (never 768).
+2. After Goal: `capturing scene…` then `scene still inferring… 3s` (etc.) — the log must not freeze until PLAN.
+3. When `/scene` returns: `scene: N elements · Xms` with N>0 on a normal Images grid. Timeout/empty is labeled, not silent. Fail-open to UIA is last resort only.
+4. Acts: `navigate` to Images, scene-click a tile (or `button=right` → **Save image as** → type a Downloads `.jpg` path → Save). One `save check:` line after confirm. Must **not** Ctrl+S the results page.
+5. `elapsed_ms` in the UI log should be in the same ballpark as sidecar `/scene end elapsed_ms=…` (CUDA often ~1–3s after warmup; first call slower). If a later observe says `sidecar busy; skipped stacked /scene`, that is the no-stack guard, not a hang.
 
 ## Pull latest (0.2.8)
 

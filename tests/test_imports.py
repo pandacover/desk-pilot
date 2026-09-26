@@ -7,7 +7,7 @@ class ImportSmokeTests(unittest.TestCase):
         from desk_pilot.desktop import get_backend
 
         self.assertEqual(desk_pilot.DEFAULT_MODEL, "openai/gpt-6-luna")
-        self.assertEqual(desk_pilot.__version__, "0.2.8")
+        self.assertEqual(desk_pilot.__version__, "0.2.9")
         backend = get_backend(force_mock=True)
         self.assertTrue(backend.dry_run)
         tree = backend.list_ui()

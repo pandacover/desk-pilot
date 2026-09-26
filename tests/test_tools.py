@@ -190,6 +190,19 @@ class ToolDispatchTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertTrue(result.get("nav_failed"))
 
+    def test_dispatch_click_right_button(self) -> None:
+        from desk_pilot.desktop.base import normalize_click_button
+
+        self.assertEqual(normalize_click_button("right"), "right")
+        self.assertEqual(normalize_click_button("double"), "double")
+        self.assertEqual(normalize_click_button(None), "left")
+        self.desk.launch_app("tldraw")
+        result = dispatch_tool(self.desk, "click", {"x": 400, "y": 280, "button": "right"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result.get("button"), "right")
+        names = [c["name"] for c in self.desk.list_ui()["controls"]]
+        self.assertIn("Save image as", names)
+
 
 if __name__ == "__main__":
     unittest.main()

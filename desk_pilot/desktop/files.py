@@ -409,6 +409,8 @@ def looks_like_image_path(text: str | None) -> bool:
     suffix = Path(raw).suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
         return False
+    if "://" in raw:
+        return False
     return ("\\" in raw or "/" in raw or (len(raw) >= 3 and raw[1] == ":"))
 
 

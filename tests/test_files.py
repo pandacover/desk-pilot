@@ -66,6 +66,14 @@ class VerifyFileTests(unittest.TestCase):
         result = verify_file("/no/such/file.jpg", expect="image")
         self.assertFalse(result["ok"])
 
+    def test_looks_like_image_path(self) -> None:
+        from desk_pilot.desktop.files import looks_like_image_path
+
+        self.assertTrue(looks_like_image_path(r"C:\Users\me\Downloads\corgi.jpg"))
+        self.assertTrue(looks_like_image_path("/tmp/photo.png"))
+        self.assertFalse(looks_like_image_path("corgi.jpg"))
+        self.assertFalse(looks_like_image_path("https://example.com/corgi.jpg"))
+
     def test_sniff_helpers(self) -> None:
         self.assertTrue(looks_like_html(b"  <html><body>"))
         self.assertEqual(sniff_kind(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8), "png")

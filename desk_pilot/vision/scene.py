@@ -18,7 +18,8 @@ SCENE_PROMPT = (
     '"box":[left,top,right,bottom],"click":[cx,cy]}],"note":"optional short"}'
     " The crop's top-left is screen (region.x, region.y); size is region.w x region.h. "
     "box and click MUST be absolute screen pixels. Cap 12 salient elements "
-    "(buttons, links, images, inputs, icons, result tiles). Skip tiny chrome noise."
+    "(buttons, links, images, inputs, icons, result tiles, context-menu items, "
+    "Save/Download). Skip tiny chrome noise."
 )
 
 
@@ -107,6 +108,14 @@ def normalize_scene(
     }
     if extra:
         scene["note"] = extra
+    elapsed = data.get("elapsed_ms")
+    if elapsed is not None:
+        try:
+            scene["elapsed_ms"] = max(0, int(elapsed))
+        except (TypeError, ValueError):
+            pass
+    if data.get("timed_out"):
+        scene["timed_out"] = True
     return scene
 
 

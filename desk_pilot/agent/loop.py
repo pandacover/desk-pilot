@@ -41,7 +41,7 @@ from desk_pilot.agent.nav import looks_like_navigation, nav_fingerprint, verify_
 from desk_pilot.agent.stuck import StuckTracker, snapshot_fingerprint
 from desk_pilot.desktop.base import DesktopBackend
 from desk_pilot.llm.openrouter import LLMClient, LLMError
-from desk_pilot.vision.client import SCENE_INFER_TIMEOUT
+from desk_pilot.vision.client import SCENE_HEARTBEAT, SCENE_INFER_TIMEOUT
 
 
 LogFn = Callable[[str, str], None]
@@ -73,9 +73,13 @@ class AgentLoop:
     canvas_mode: bool = False
     scene_client: Any | None = None
     scene_timeout: float = SCENE_INFER_TIMEOUT
+    scene_heartbeat: float = SCENE_HEARTBEAT
+    plan_heartbeat: float = SCENE_HEARTBEAT
     _target_title: str = ""
     _target_process: str = ""
     _last_scene: dict[str, Any] | None = None
+    _scene_worker: threading.Thread | None = None
+    _pending_save_path: str | None = None
 
     def run(self, goal: str) -> RunResult:
         goal = (goal or "").strip()
@@ -90,6 +94,8 @@ class AgentLoop:
         self._target_title = ""
         self._target_process = ""
         self._last_scene = None
+        self._scene_worker = None
+        self._pending_save_path = None
         self._stuck = StuckTracker()
         self._pending_nav_text: str | None = None
         self._log("info", f"Goal: {goal}")
@@ -149,6 +155,9 @@ class AgentLoop:
                 self._log("error", f"LLM error: {exc}")
                 self._clear_guide()
                 return RunResult("fail", f"LLM error: {exc}", step, self.backend.dry_run)
+            if self._stopped():
+                self._clear_guide()
+                return RunResult("stopped", "Stopped by user.", step - 1, self.backend.dry_run)
 
             tool_calls = normalize_tool_calls(response.get("tool_calls") or [])
             content = (response.get("content") or "").strip()
@@ -215,6 +224,7 @@ class AgentLoop:
                     break
                 self._log("act", f"{name} {compact_json(args, 400)}")
                 result = self._dispatch_action(name, args)
+                result = self._maybe_confirm_saved_file(name, args, result)
                 if isinstance(result, TerminalCall):
                     terminal = result
                     tool_body = compact_json(result.payload)
@@ -440,7 +450,7 @@ class AgentLoop:
         for attempt in range(2):
             payload = sanitize_messages(self._messages)
             try:
-                return self.llm.complete(payload, tools)
+                return self._complete_with_heartbeat(payload, tools)
             except LLMError as exc:
                 last_error = exc
                 if not is_tool_pairing_error(exc):
@@ -448,6 +458,40 @@ class AgentLoop:
                 self._log("error", f"{exc} Resetting tool-call history and retrying.")
                 self._reset_history()
         raise last_error or LLMError("OpenRouter request failed.")
+
+    def _complete_with_heartbeat(
+        self,
+        payload: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Run the planner HTTP call off-thread so the UI log can keep moving."""
+        holder: dict[str, Any] = {}
+
+        def run() -> None:
+            try:
+                holder["result"] = self.llm.complete(payload, tools)
+            except Exception as exc:  # noqa: BLE001 — re-raised on the agent thread
+                holder["error"] = exc
+
+        worker = threading.Thread(target=run, name="openrouter-complete", daemon=True)
+        worker.start()
+        wait = float(getattr(self.llm, "timeout", 90.0) or 90.0)
+        finished = self._wait_with_heartbeats(
+            worker,
+            wait,
+            kind="plan",
+            idle_message="still waiting on the model…",
+            heartbeat=self.plan_heartbeat,
+        )
+        if "error" in holder:
+            raise holder["error"]
+        if "result" in holder:
+            return holder["result"]
+        if self._stopped():
+            return {"content": "", "tool_calls": []}
+        if not finished:
+            raise LLMError(f"OpenRouter request timed out after {wait:g}s.")
+        raise LLMError("OpenRouter request failed.")
 
     def _reset_history(self) -> None:
         snapshot = self._last_snapshot if isinstance(getattr(self, "_last_snapshot", None), dict) else {}
@@ -523,6 +567,51 @@ class AgentLoop:
             return checked
         return dispatch_tool(self.backend, name, args, extra=extra)
 
+    def _maybe_confirm_saved_file(
+        self,
+        name: str,
+        args: dict[str, Any],
+        result: dict[str, Any] | TerminalCall,
+    ) -> dict[str, Any] | TerminalCall:
+        """One cheap exists/image check after a Save dialog confirm — not a verify loop.
+
+        Ctrl+S on a results page must not trigger this (it saves HTML).
+        """
+        if isinstance(result, TerminalCall) or self.guide_mode:
+            return result
+        from desk_pilot.desktop.files import looks_like_image_path, verify_file
+
+        if name == "type_text":
+            text = str(args.get("text") or "").strip().strip('"')
+            if looks_like_image_path(text):
+                self._pending_save_path = text
+            return result
+        pending = (self._pending_save_path or "").strip()
+        if not pending:
+            return result
+        confirm = False
+        if name == "hotkey":
+            keys = str(args.get("keys") or "").strip().lower().replace(" ", "")
+            confirm = keys in {"enter", "return"}
+        elif name == "click":
+            label = str(args.get("name") or args.get("automation_id") or "").strip().lower()
+            confirm = label == "save" or (label.startswith("save") and "as" not in label)
+        if not confirm:
+            return result
+        self._pending_save_path = None
+        checked = verify_file(pending, expect="image")
+        payload = dict(result) if isinstance(result, dict) else {"ok": bool(result)}
+        payload["verify_file"] = checked
+        ok = bool(checked.get("ok"))
+        kind = str(checked.get("kind") or "")
+        extra = checked.get("error") or kind
+        self._log(
+            "observe",
+            f"save check: {'ok' if ok else 'missing/not image'} · {pending}"
+            + (f" · {extra}" if extra and not ok else ""),
+        )
+        return payload
+
     def _observe_pair(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """UIA dump overlapped with FastVLM /scene. Scene is ready before PLAN.
 
@@ -530,10 +619,26 @@ class AgentLoop:
         UIA-only. Do not start a second /scene — the sidecar serializes generate
         behind one lock, so a retry would hang until the first (still running)
         inference finishes. STOP skips a new infer and abandons the join wait.
+        A leftover worker from a previous fail-open is also not joined (stale
+        pixels) and not stacked — skip to UIA until that generate finishes.
         """
         from desk_pilot.vision.scene import empty_scene
 
         want_scene = self._scene_enabled() and not self._stopped()
+        leftover = self._scene_worker is not None and self._scene_worker.is_alive()
+        if leftover and want_scene:
+            self._log(
+                "observe",
+                "sidecar still inferring previous scene; using UIA (no stacked /scene)",
+            )
+            snapshot = self.backend.list_ui()
+            scene = empty_scene(
+                window=self._snapshot_window_name(snapshot),
+                note="sidecar busy; skipped stacked /scene",
+            )
+            scene["elapsed_ms"] = 0
+            return snapshot, scene
+
         self._log("observe", "capturing scene…" if want_scene else "listing UI…")
         box: list[int] | None = None
         try:
@@ -541,6 +646,7 @@ class AgentLoop:
         except Exception:
             box = None
         holder: dict[str, Any] = {}
+        started = time.perf_counter()
 
         def run_scene() -> None:
             holder["scene"] = self._infer_scene(snapshot=None, box=box)
@@ -549,10 +655,12 @@ class AgentLoop:
         wait = max(0.05, float(self.scene_timeout))
         if want_scene and box:
             worker = threading.Thread(target=run_scene, name="fastvlm-scene", daemon=True)
+            self._scene_worker = worker
             worker.start()
         snapshot = self.backend.list_ui()
+        timed_out = False
         if worker is not None:
-            self._join_scene_worker(worker, wait)
+            finished = self._join_scene_worker(worker, wait)
             scene = holder.get("scene")
             if scene is None:
                 window = self._snapshot_window_name(snapshot)
@@ -560,12 +668,26 @@ class AgentLoop:
                     self._log("observe", "scene skipped (stop); continuing with UIA")
                     scene = empty_scene(window=window, note="scene skipped (stop); continuing with UIA")
                 else:
-                    self._log("observe", f"FastVLM last-resort skip after {wait:g}s; continuing with UIA (no second /scene)")
+                    timed_out = True
+                    self._log(
+                        "observe",
+                        f"FastVLM last-resort skip after {wait:g}s; continuing with UIA (no second /scene)",
+                    )
                     scene = empty_scene(window=window, note="scene timed out; continuing with UIA")
+                    scene["timed_out"] = True
+            elif not finished and not self._stopped():
+                timed_out = True
         elif want_scene and not self._stopped():
             scene = self._infer_scene(snapshot=snapshot, box=None)
         else:
             scene = None
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        if isinstance(scene, dict):
+            scene = dict(scene)
+            if scene.get("elapsed_ms") is None:
+                scene["elapsed_ms"] = elapsed_ms
+            if timed_out:
+                scene["timed_out"] = True
         if isinstance(snapshot, dict) and isinstance(scene, dict) and not scene.get("window"):
             title = self._snapshot_window_name(snapshot)
             if title:
@@ -573,15 +695,47 @@ class AgentLoop:
                 scene["window"] = title
         return snapshot, scene if isinstance(scene, dict) else None
 
-    def _join_scene_worker(self, worker: threading.Thread, wait: float) -> None:
-        deadline = time.monotonic() + wait
+    def _join_scene_worker(self, worker: threading.Thread, wait: float) -> bool:
+        return self._wait_with_heartbeats(
+            worker,
+            wait,
+            kind="observe",
+            idle_message="scene still inferring…",
+            heartbeat=self.scene_heartbeat,
+        )
+
+    def _wait_with_heartbeats(
+        self,
+        worker: threading.Thread,
+        wait: float,
+        *,
+        kind: str,
+        idle_message: str,
+        heartbeat: float,
+    ) -> bool:
+        """Join ``worker`` up to ``wait`` seconds, logging elapsed seconds while blocked.
+
+        Returns True if the worker finished, False on timeout or STOP.
+        """
+        deadline = time.monotonic() + max(0.0, float(wait))
+        started = time.monotonic()
+        last_beat = started
+        interval = max(0.05, float(heartbeat)) if heartbeat else 0.0
         while worker.is_alive():
             if self._stopped():
-                return
+                return False
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return
-            worker.join(timeout=min(0.2, remaining))
+                return False
+            now = time.monotonic()
+            if interval and now - last_beat >= interval:
+                self._log(kind, f"{idle_message} {int(now - started)}s")
+                last_beat = now
+            slice_t = min(0.2, remaining)
+            if interval:
+                slice_t = min(slice_t, max(0.05, interval - (now - last_beat)))
+            worker.join(timeout=slice_t)
+        return True
 
     def _snapshot_window_name(self, snapshot: dict[str, Any] | None) -> str:
         window = snapshot.get("window") if isinstance(snapshot, dict) else None
@@ -621,9 +775,21 @@ class AgentLoop:
         if not scene:
             return
         count = len(scene.get("elements") or [])
+        parts = [f"scene: {count} elements"]
+        elapsed = scene.get("elapsed_ms")
+        if elapsed is not None:
+            try:
+                parts.append(f"{int(elapsed)}ms")
+            except (TypeError, ValueError):
+                pass
+        if scene.get("timed_out"):
+            parts.append("timed out")
+        elif count == 0:
+            parts.append("empty")
         note = str(scene.get("note") or "")
-        extra = f" · {note}" if note else ""
-        self._log("observe", f"scene: {count} elements{extra}")
+        if note:
+            parts.append(note)
+        self._log("observe", " · ".join(parts))
 
     def _window_rect(self) -> list[int] | None:
         from desk_pilot.agent.canvas import window_rect_from_snapshot

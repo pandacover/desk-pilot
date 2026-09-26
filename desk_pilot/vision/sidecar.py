@@ -27,6 +27,7 @@ from desk_pilot.vision import (
     DEFAULT_MODEL_ID,
     DEFAULT_PORT,
     HEALTH_STATUSES,
+    JSON_STOP_EVERY,
     SCENE_MAX_EDGE,
     SCENE_MAX_NEW_TOKENS,
     SCENE_MIN_TOWER_EDGE,
@@ -278,6 +279,7 @@ def _generate(model: Any, tokenizer: Any, image: Any, prompt: str) -> str:
     pad = getattr(tokenizer, "eos_token_id", None) or getattr(tokenizer, "pad_token_id", None)
     if pad is not None:
         gen_kwargs["pad_token_id"] = pad
+        gen_kwargs["eos_token_id"] = pad
     if stopping is not None:
         gen_kwargs["stopping_criteria"] = stopping
     inference = getattr(torch, "inference_mode", torch.no_grad)
@@ -368,7 +370,12 @@ def _json_stopping(tokenizer: Any, prompt_len: int) -> Any | None:
 
         def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
             gen = input_ids[0, self._prompt_len :]
-            if int(gen.shape[-1]) < 8:
+            n = int(gen.shape[-1])
+            if n < 8:
+                return False
+            # Decode is the expensive part; checking every token adds latency.
+            every = max(1, int(JSON_STOP_EVERY))
+            if n % every != 0 and n < SCENE_MAX_NEW_TOKENS:
                 return False
             text = self._tok.decode(gen, skip_special_tokens=True)
             return json_object_complete(text)
@@ -406,16 +413,30 @@ class Handler(BaseHTTPRequestHandler):
             f"native_crop={SCENE_NATIVE_CROP}"
         )
         prev = health_payload().get("status")
+        got_lock = _infer_lock.acquire(blocking=False)
+        scene: dict[str, Any]
+        if not got_lock:
+            # A previous generate is still running. Waiting here would stack another
+            # 1024² decode behind `_infer_lock` and freeze the next observe.
+            scene = empty_scene(window=window, region=region, note="sidecar busy; skipped stacked /scene")
+            elapsed_ms = int((time.perf_counter() - started) * 1000)
+            scene["elapsed_ms"] = elapsed_ms
+            sidecar_log(f"/scene skip busy elapsed_ms={elapsed_ms}")
+            self._send(200, scene)
+            return
         if prev in {"ready", "busy"}:
             set_state(status="busy", phase="inferring")
-        scene: dict[str, Any] = empty_scene(window=window, region=region, note="infer failed")
+        scene = empty_scene(window=window, region=region, note="infer failed")
         try:
-            with _infer_lock:
-                scene = infer_scene(path, image_bytes, window, region)
+            scene = infer_scene(path, image_bytes, window, region)
         finally:
+            _infer_lock.release()
             elapsed_ms = int((time.perf_counter() - started) * 1000)
             if health_payload().get("status") == "busy":
                 set_state(status="ready", phase="")
+            if isinstance(scene, dict):
+                scene = dict(scene)
+                scene["elapsed_ms"] = elapsed_ms
             count = len((scene if isinstance(scene, dict) else {}).get("elements") or [])
             note = str((scene or {}).get("note") or "")
             extra = f" note={note[:80]!r}" if note else ""
