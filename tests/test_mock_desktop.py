@@ -105,6 +105,24 @@ class MockDesktopTests(unittest.TestCase):
         self.assertIn("Address and search bar", names)
         self.assertNotIn("Canvas", names)
 
+    def test_right_click_opens_save_dialog(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        self.desk.launch_app("tldraw")
+        opened = self.desk.click(x=500, y=400, button="right")
+        self.assertTrue(opened["ok"])
+        self.assertEqual(self.desk.list_ui()["window"]["name"], "Context")
+        self.assertTrue(self.desk.click(name="Save image as")["ok"])
+        self.assertEqual(self.desk.list_ui()["window"]["name"], "Save As")
+        with tempfile.TemporaryDirectory() as raw:
+            dest = str(Path(raw) / "tile.jpg")
+            self.desk.type_text(dest, clear=True)
+            saved = self.desk.click(name="Save")
+            self.assertTrue(saved["ok"])
+            self.assertTrue(Path(dest).is_file())
+            self.assertGreater(Path(dest).stat().st_size, 32)
+
 
 if __name__ == "__main__":
     unittest.main()

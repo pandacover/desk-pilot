@@ -14,7 +14,10 @@ SCENE_NATIVE_CROP = 1024
 SCENE_MAX_EDGE = SCENE_NATIVE_CROP
 SCENE_MIN_TOWER_EDGE = SCENE_NATIVE_CROP
 # Compact scene JSON is small. Official HF snippet uses 128; keep greedy + JSON stop.
+# 128 vs 192 only matters if JSON never completes; early-stop is the real cap.
 SCENE_MAX_NEW_TOKENS = 192
+# Decode-and-parse the partial object every N new tokens (not every token).
+JSON_STOP_EVERY = 4
 HEALTH_STATUSES = ("loading", "ready", "busy", "error")
 
 _MISSING_PKG_RES = (

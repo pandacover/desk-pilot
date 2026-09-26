@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.9
+
+- **Live log keeps moving during FastVLM**: `_join_scene_worker` used to poll `/scene` for up to 40s with no UI lines after `capturing scene…` — that matched “logs gone”. The agent log now heartbeats every ~2.5s (`scene still inferring… Ns`) while blocked on observe, and again while waiting on the planner (`still waiting on the model… Ns`). When `/scene` returns, the UI log mirrors sidecar timing: `scene: N elements · elapsed_ms` and notes **timed out** / **empty**.
+- **Latency without shrinking encode**: native **1024px** crop is unchanged (do not reintroduce 768). Real levers: (1) heartbeats so a 1–15s CUDA generate is not a silent hang; (2) **do not stack** a second `/scene` behind sidecar `_infer_lock` after a fail-open — leftover generate of stale pixels is skipped (`sidecar busy; skipped stacked /scene`) instead of waiting for old+new decode; (3) JSON early-stop checks every 4 new tokens instead of decoding the partial object on every token; (4) keep greedy + 192 `max_new_tokens` — JSON-stop is the real cap, 128 vs 192 only matters if the object never closes. Observe still overlaps `list_ui` with `/scene` and still blocks PLAN until the scene (or fail-open) is ready so clicks stay grounded.
+- **Grounded save**: `click` accepts `button=left|right|double`. Right-click is the general context-menu primitive (Save image as / Copy), not a Google Images recipe. After a Save dialog path is typed and confirmed (Save or Enter), the loop runs **one** `verify_file` (exists + image-vs-HTML). Ctrl+S on a results page still does **not** auto-verify.
+
 ## 0.2.8
 
 - **FastVLM native 1024 crop**: 0.2.7 shrank encode to 512px (CPU) / 768px (CUDA) for speed. On live CUDA that produced FastViT features `(3072×12×12)` (768/64) which then pooled to `(3072×0×0)` — every `/scene` failed, every observe was `0 elements`. Restore Apple's **1024²** crop. Keep greedy decode, 192 new tokens, and JSON early-stop for latency. Upscale (never downscale) if `pixel_values` spatial size is below 1024. Log source WxH and vision-tower WxH on each `/scene`.

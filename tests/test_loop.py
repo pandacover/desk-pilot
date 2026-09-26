@@ -584,6 +584,178 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("capturing scene", joined.lower())
         self.assertIn("stop", joined.lower())
 
+    def test_scene_heartbeat_and_elapsed_in_log(self) -> None:
+        import time
+
+        class SlowOkScene:
+            def infer_scene(self, **kwargs: Any) -> dict[str, Any]:
+                time.sleep(0.32)
+                return {
+                    "window": kwargs.get("window") or "Desktop",
+                    "region": kwargs.get("region") or {"x": 0, "y": 0, "w": 1, "h": 1},
+                    "elapsed_ms": 318,
+                    "elements": [
+                        {
+                            "id": "img_0",
+                            "label": "Start",
+                            "role": "button",
+                            "box": [0, 1040, 48, 1080],
+                            "click": [24, 1060],
+                        }
+                    ],
+                }
+
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=ScriptedLLM([{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]),
+            max_steps=3,
+            scene_client=SlowOkScene(),
+            scene_timeout=2.0,
+            scene_heartbeat=0.1,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        self.assertEqual(result.status, "done")
+        observe = "\n".join(message for kind, message in logs if kind == "observe")
+        self.assertIn("still inferring", observe.lower())
+        self.assertRegex(observe, r"scene: 1 elements")
+        self.assertRegex(observe, r"\d+ms")
+        self.assertNotIn("timed out", observe.lower())
+
+    def test_scene_log_notes_timeout_and_empty(self) -> None:
+        import time
+
+        class SlowSceneClient:
+            def infer_scene(self, **kwargs: Any) -> dict[str, Any]:
+                time.sleep(4)
+                return {"elements": []}
+
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=ScriptedLLM([{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]),
+            max_steps=3,
+            scene_client=SlowSceneClient(),
+            scene_timeout=0.25,
+            scene_heartbeat=0.08,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        self.assertEqual(result.status, "done")
+        observe = "\n".join(message for kind, message in logs if kind == "observe")
+        self.assertIn("still inferring", observe.lower())
+        self.assertIn("timed out", observe.lower())
+        self.assertIn("0 elements", observe)
+        self.assertRegex(observe, r"\d+ms")
+
+    def test_stacked_scene_is_skipped(self) -> None:
+        import threading
+        import time
+
+        class SlowSceneClient:
+            def __init__(self) -> None:
+                self.calls = 0
+                self._lock = threading.Lock()
+
+            def infer_scene(self, **kwargs: Any) -> dict[str, Any]:
+                with self._lock:
+                    self.calls += 1
+                time.sleep(3)
+                return {
+                    "elements": [
+                        {"id": "late", "label": "too late", "role": "other", "box": [0, 0, 10, 10], "click": [5, 5]}
+                    ]
+                }
+
+        client = SlowSceneClient()
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [
+                {"content": "", "tool_calls": [_call("list_ui", "{}", "1")]},
+                {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]},
+            ]
+        )
+        started = time.perf_counter()
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=5,
+            scene_client=client,
+            scene_timeout=0.2,
+            scene_heartbeat=0.5,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(result.status, "done")
+        self.assertEqual(client.calls, 1)
+        self.assertLess(elapsed, 2.0)
+        observe = "\n".join(message for kind, message in logs if kind == "observe")
+        self.assertIn("no stacked /scene", observe.lower())
+        self.assertIn("sidecar busy", observe.lower())
+
+    def test_plan_heartbeat_while_llm_waits(self) -> None:
+        import time
+
+        class SlowLLM:
+            def complete(self, messages, tools):
+                time.sleep(0.28)
+                return {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}
+
+        logs: list[tuple[str, str]] = []
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=SlowLLM(),
+            max_steps=3,
+            plan_heartbeat=0.1,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        self.assertEqual(result.status, "done")
+        plan = "\n".join(message for kind, message in logs if kind == "plan")
+        self.assertIn("still waiting on the model", plan.lower())
+
+    def test_right_click_save_confirms_file_once(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as raw:
+            dest = str(Path(raw) / "corgi.jpg")
+            llm = ScriptedLLM(
+                [
+                    {"content": "", "tool_calls": [_call("launch_app", '{"name":"tldraw"}', "1")]},
+                    {
+                        "content": "",
+                        "tool_calls": [_call("click", '{"x":400,"y":300,"button":"right"}', "2")],
+                    },
+                    {
+                        "content": "",
+                        "tool_calls": [_call("click", '{"name":"Save image as"}', "3")],
+                    },
+                    {
+                        "content": "",
+                        "tool_calls": [_call("type_text", json.dumps({"text": dest, "clear": True}), "4")],
+                    },
+                    {"content": "", "tool_calls": [_call("click", '{"name":"Save"}', "5")]},
+                    {
+                        "content": "",
+                        "tool_calls": [_call("done", '{"result":"saved the picture"}', "z")],
+                    },
+                ]
+            )
+            logs: list[tuple[str, str]] = []
+            desk = MockDesktop()
+            result = AgentLoop(
+                backend=desk,
+                llm=llm,
+                max_steps=10,
+                on_log=lambda k, m: logs.append((k, m)),
+            ).run("download a picture of a corgi")
+            self.assertEqual(result.status, "done")
+            self.assertTrue(Path(dest).is_file())
+            joined = "\n".join(f"{k} {m}" for k, m in logs).lower()
+            self.assertIn("save check: ok", joined)
+            acts = [m for k, m in logs if k == "act"]
+            self.assertFalse(any("verify_file" in m for m in acts))
+            self.assertTrue(any("click right" in a for a in desk.actions))
+
 
 if __name__ == "__main__":
     unittest.main()

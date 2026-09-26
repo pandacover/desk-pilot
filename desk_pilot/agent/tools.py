@@ -33,7 +33,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "click",
             "description": (
                 "Click a control in the focused window by automation_id or visible name, "
-                "or click screen coordinates if UIA cannot find it."
+                "or click screen coordinates if UIA cannot find it. "
+                "button=left (default), right (context menu: Save image as / Copy), or double."
             ),
             "parameters": {
                 "type": "object",
@@ -42,6 +43,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "name": {"type": "string", "description": "Visible Name property; case-insensitive."},
                     "x": {"type": "integer", "description": "Screen X, used when no control id/name."},
                     "y": {"type": "integer", "description": "Screen Y, used when no control id/name."},
+                    "button": {
+                        "type": "string",
+                        "description": "left (default), right (context menu), or double.",
+                    },
                 },
                 "additionalProperties": False,
             },
@@ -311,7 +316,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "name": "verify_file",
             "description": (
                 "Check a saved path on disk. For image downloads, rejects HTML masquerading "
-                "as .jpg/.png (magic bytes / size). Optional — do not call every step."
+                "as .jpg/.png (magic bytes / size). Optional — the loop already does one "
+                "cheap check after a Save dialog confirm; do not spam it every step."
             ),
             "parameters": {
                 "type": "object",
@@ -435,6 +441,8 @@ def dispatch_tool(
     if name == "list_ui":
         return backend.list_ui(max_depth=int(args.get("max_depth") or 5))
     if name == "click":
+        from desk_pilot.desktop.base import normalize_click_button
+
         x = args.get("x")
         y = args.get("y")
         return backend.click(
@@ -442,6 +450,7 @@ def dispatch_tool(
             name=_opt_str(args.get("name")),
             x=int(x) if x is not None and x != "" else None,
             y=int(y) if y is not None and y != "" else None,
+            button=normalize_click_button(args.get("button")),
         )
     if name == "drag":
         try:
