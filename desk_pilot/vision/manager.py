@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from desk_pilot.app.config import cache_dir
 from desk_pilot.vision import DEFAULT_HOST, DEFAULT_PORT
-from desk_pilot.vision.client import SceneClient, StubSceneClient, default_sidecar_url
+from desk_pilot.vision.client import SCENE_INFER_TIMEOUT, SceneClient, StubSceneClient, default_sidecar_url
 
 LogFn = Callable[[str, str], None]
 
@@ -51,7 +51,7 @@ class SidecarManager:
             self._last_health = {"status": "error", "mode": "off", "error": "FastVLM disabled"}
             self._log("info", "FastVLM off — observe is UIA only.")
             return
-        self.client = SceneClient(self.url)
+        self.client = SceneClient(self.url, timeout=SCENE_INFER_TIMEOUT)
         existing = self.client.health()
         if existing.get("status") in {"loading", "ready"}:
             self._last_health = existing

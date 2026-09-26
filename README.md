@@ -80,7 +80,7 @@ python -m desk_pilot --cli --no-fastvlm --goal "Open Notepad and type hello"
 observe (UIA tree + FastVLM scene JSON) → plan (OpenRouter tools, no image) → act → observe → repeat
 ```
 
-After each ACT settles, Desk Pilot captures a compressed crop of the focused window/content region and POSTs it to the local FastVLM sidecar (`POST /scene`) **in parallel** with `list_ui`, so the scene is ready before PLAN. The planner sees `scene:` compact JSON (cap ~20 elements, screen coords) — not a screenshot.
+After each ACT settles, Desk Pilot captures a compressed crop of the focused window/content region and POSTs it to the local FastVLM sidecar (`POST /scene`) **in parallel** with `list_ui`, so the scene is ready before PLAN. The planner sees `scene:` compact JSON (cap ~20 elements, screen coords) — not a screenshot. CPU inference can be slow: if `/scene` does not return within ~25s, that step fail-opens to UIA-only instead of blocking PLAN.
 
 Tools the model can call:
 
@@ -108,6 +108,15 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` → `done` with the full paths. Not Win+S, not Edge, not Explorer search.
 
 The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once (and refreshes the FastVLM scene). Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+
+## Pull latest (0.2.7)
+
+CPU FastVLM observe no longer hangs after **Goal**. If scene inference exceeds ~25s, the loop skips it, logs `scene timed out; continuing with UIA`, and plans from the UIA tree. It does not start a second `/scene` behind the sidecar lock. **Run** should show `capturing scene…` right after the goal.
+
+```powershell
+git pull
+python -m desk_pilot
+```
 
 ## Pull latest (0.2.6)
 

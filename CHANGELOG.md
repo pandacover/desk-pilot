@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.7
+
+- **FastVLM observe no longer hangs after Goal**: `_observe_pair` logged nothing until scene inference returned. On CPU, FastVLM often takes longer than the 45s join, then the loop called `/scene` *again* on the agent thread — blocked behind the sidecar `_infer_lock` while the first generate was still running. The UI sat on “Starting agent loop / Goal” with no OBSERVE/PLAN. Join timeout now fail-opens to UIA (`empty_scene` note `scene timed out; continuing with UIA`) and does **not** start a second infer. Late daemon results are ignored for that step. Client `/scene` read timeout is 25s (was 60s). Log `capturing scene…` immediately, then timeout/skip.
+
 ## 0.2.6
 
 - **FastVLM `timm`**: `apple/FastVLM-0.5B` remote code imports `timm` for the vision tower. Live Windows load failed with `ImportError: This modeling file requires ... timm`. `requirements-vision.txt` now includes `timm`, plus `einops` and `sentencepiece` (the other easy-to-miss extras from Apple's FastVLM pyproject). Reinstall vision deps, then restart Desk Pilot.

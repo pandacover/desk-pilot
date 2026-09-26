@@ -67,6 +67,38 @@ class StubClientTests(unittest.TestCase):
         self.assertIn("stub", scene.get("note") or "")
         self.assertEqual(len(client.calls), 1)
 
+    def test_infer_scene_read_timeout_fail_open(self) -> None:
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = int(sock.getsockname()[1])
+        client = SceneClient(f"http://127.0.0.1:{port}", timeout=0.4)
+        try:
+            started = time.time()
+            scene = client.infer_scene(
+                window="Helium",
+                region={"x": 0, "y": 0, "w": 10, "h": 10},
+                timeout=0.4,
+            )
+            elapsed = time.time() - started
+            self.assertLess(elapsed, 2.5)
+            self.assertEqual(scene["elements"], [])
+            self.assertIn("failed", (scene.get("note") or "").lower())
+        finally:
+            client.close()
+            sock.close()
+
+    def test_default_infer_timeout_is_capped(self) -> None:
+        from desk_pilot.vision.client import SCENE_INFER_TIMEOUT
+
+        self.assertGreaterEqual(SCENE_INFER_TIMEOUT, 20.0)
+        self.assertLessEqual(SCENE_INFER_TIMEOUT, 30.0)
+        client = SceneClient("http://127.0.0.1:9")
+        try:
+            self.assertEqual(client.timeout, SCENE_INFER_TIMEOUT)
+        finally:
+            client.close()
+
 
 class SidecarHttpTests(unittest.TestCase):
     def test_stub_sidecar_health_and_scene(self) -> None:

@@ -10,6 +10,9 @@ import httpx
 from desk_pilot.vision import DEFAULT_HOST, DEFAULT_PORT
 from desk_pilot.vision.scene import empty_scene, normalize_scene
 
+# Agent-loop /scene wait. CPU FastVLM can exceed this; fail-open to UIA rather than hang.
+SCENE_INFER_TIMEOUT = 25.0
+
 
 def default_sidecar_url() -> str:
     import os
@@ -20,7 +23,7 @@ def default_sidecar_url() -> str:
 class SceneClient:
     """POST /scene and GET /health against a local sidecar."""
 
-    def __init__(self, base_url: str | None = None, *, timeout: float = 60.0) -> None:
+    def __init__(self, base_url: str | None = None, *, timeout: float = SCENE_INFER_TIMEOUT) -> None:
         self.base_url = (base_url or default_sidecar_url()).rstrip("/")
         self.timeout = timeout
         self._http = httpx.Client(timeout=httpx.Timeout(timeout, connect=2.0))
@@ -57,6 +60,7 @@ class SceneClient:
         image_bytes: bytes | None = None,
         window: str = "",
         region: dict[str, int] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"window": window or "", "region": region or {"x": 0, "y": 0, "w": 1, "h": 1}}
         if path:
@@ -65,8 +69,13 @@ class SceneClient:
             import base64
 
             body["image_b64"] = base64.b64encode(image_bytes).decode("ascii")
+        read_timeout = self.timeout if timeout is None else float(timeout)
         try:
-            response = self._http.post(urljoin(self.base_url + "/", "scene"), json=body)
+            response = self._http.post(
+                urljoin(self.base_url + "/", "scene"),
+                json=body,
+                timeout=httpx.Timeout(read_timeout, connect=2.0),
+            )
         except httpx.HTTPError as exc:
             return empty_scene(window=window, region=region, note=f"sidecar /scene failed: {exc}")
         if response.status_code >= 400:
@@ -107,6 +116,7 @@ class StubSceneClient:
         image_bytes: bytes | None = None,
         window: str = "",
         region: dict[str, int] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         payload = {
             "path": path,

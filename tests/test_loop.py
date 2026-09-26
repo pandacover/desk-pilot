@@ -413,6 +413,84 @@ class AgentLoopTests(unittest.TestCase):
         self.assertNotIn("image_url", blob)
         self.assertNotIn("data:image", blob)
 
+    def test_observe_logs_capturing_scene_before_window(self) -> None:
+        from desk_pilot.vision.client import StubSceneClient
+
+        logs: list[tuple[str, str]] = []
+        llm = ScriptedLLM(
+            [{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]
+        )
+        AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=3,
+            scene_client=StubSceneClient(),
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        observe = [message for kind, message in logs if kind == "observe"]
+        self.assertTrue(observe)
+        self.assertIn("capturing scene", observe[0].lower())
+        self.assertTrue(any("Window:" in message for message in observe))
+
+    def test_scene_timeout_does_not_infer_twice_or_hang(self) -> None:
+        import threading
+        import time
+
+        class SlowSceneClient:
+            def __init__(self) -> None:
+                self.calls = 0
+                self._lock = threading.Lock()
+                self.started = threading.Event()
+
+            def infer_scene(self, **kwargs: Any) -> dict[str, Any]:
+                with self._lock:
+                    self.calls += 1
+                self.started.set()
+                time.sleep(8)
+                return {
+                    "window": kwargs.get("window") or "",
+                    "region": kwargs.get("region") or {"x": 0, "y": 0, "w": 1, "h": 1},
+                    "elements": [{"id": "late", "label": "too late", "role": "other", "box": [0, 0, 10, 10], "click": [5, 5]}],
+                }
+
+        client = SlowSceneClient()
+        logs: list[tuple[str, str]] = []
+
+        class RecordingLLM(ScriptedLLM):
+            def __init__(self, script):
+                super().__init__(script)
+                self.payloads: list[list[dict[str, Any]]] = []
+
+            def complete(self, messages, tools):
+                self.payloads.append(messages)
+                return super().complete(messages, tools)
+
+        llm = RecordingLLM(
+            [{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]
+        )
+        started = time.perf_counter()
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=3,
+            scene_client=client,
+            scene_timeout=0.25,
+            on_log=lambda k, m: logs.append((k, m)),
+        ).run("Click Start")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(result.status, "done")
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(client.calls, 1)
+        observe = "\n".join(message for kind, message in logs if kind == "observe")
+        self.assertIn("capturing scene", observe.lower())
+        self.assertIn("timed out", observe.lower())
+        self.assertIn("continuing with UIA", observe)
+        user_text = " ".join(
+            str(m.get("content") or "") for payload in llm.payloads for m in payload if m.get("role") == "user"
+        )
+        self.assertIn("scene timed out", user_text)
+        self.assertNotIn("too late", user_text)
+
 
 if __name__ == "__main__":
     unittest.main()
