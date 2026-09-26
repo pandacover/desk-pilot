@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import base64
 import threading
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable
 
 from desk_pilot.agent.guide import (
@@ -42,7 +40,6 @@ from desk_pilot.agent.tools import (
 from desk_pilot.agent.nav import looks_like_navigation, nav_fingerprint, verify_enter_navigation
 from desk_pilot.agent.stuck import StuckTracker, snapshot_fingerprint
 from desk_pilot.desktop.base import DesktopBackend
-from desk_pilot.desktop.files import is_image_download_goal, looks_like_image_path, verify_file
 from desk_pilot.llm.openrouter import LLMClient, LLMError
 
 
@@ -73,8 +70,10 @@ class AgentLoop:
     _messages: list[dict[str, Any]] = field(default_factory=list)
     guide_mode: bool = False
     canvas_mode: bool = False
+    scene_client: Any | None = None
     _target_title: str = ""
     _target_process: str = ""
+    _last_scene: dict[str, Any] | None = None
 
     def run(self, goal: str) -> RunResult:
         goal = (goal or "").strip()
@@ -83,14 +82,14 @@ class AgentLoop:
 
         self._goal = goal
         self.guide_mode = is_guide_goal(goal, force=self.force_guide)
-        from desk_pilot.agent.canvas import is_art_goal, should_use_canvas_mode
+        from desk_pilot.agent.canvas import is_art_goal
 
         self.canvas_mode = (not self.guide_mode) and is_art_goal(goal)
         self._target_title = ""
         self._target_process = ""
+        self._last_scene = None
         self._stuck = StuckTracker()
         self._pending_nav_text: str | None = None
-        self._pending_save_path: str | None = None
         self._log("info", f"Goal: {goal}")
         if self.guide_mode:
             self._log(
@@ -100,31 +99,35 @@ class AgentLoop:
         elif self.canvas_mode:
             self._log(
                 "info",
-                "Canvas mode: art goal — vision + drag (prepare_art / geometric playbook). Guide stays off.",
+                "Canvas mode: art goal — FastVLM scene + drag (prepare_art / geometric playbook). Guide stays off.",
             )
         if self.backend.dry_run:
             self._log("info", "Dry-run desktop: actions are simulated, not sent to the OS.")
 
-        snapshot = self.backend.list_ui()
+        snapshot, scene = self._observe_pair()
         self._last_snapshot = snapshot
+        self._last_scene = scene
         self._remember_target(snapshot)
         self._stuck.last_fp = snapshot_fingerprint(snapshot)
-        if (not self.guide_mode) and should_use_canvas_mode(goal, snapshot):
-            self._enable_canvas("thin UIA tree or art/canvas window")
         system = self._system_prompt()
         self._messages = [
             {"role": "system", "content": system},
             {
                 "role": "user",
                 "content": user_goal_message(
-                    goal, snapshot, self.backend.dry_run, guide=self.guide_mode, canvas=self.canvas_mode
+                    goal,
+                    snapshot,
+                    self.backend.dry_run,
+                    guide=self.guide_mode,
+                    canvas=self.canvas_mode,
+                    scene=scene,
                 ),
             },
         ]
         self._log("observe", f"Window: {self._window_label(snapshot)}")
+        self._log_scene(scene)
         if snapshot.get("com_error"):
             self._log("error", snapshot.get("error") or "list_ui COM failure")
-        self._attach_canvas_screenshot(snapshot)
 
         for step in range(1, self.max_steps + 1):
             if self._stopped():
@@ -173,7 +176,6 @@ class AgentLoop:
             self._messages.append(assistant_msg)
 
             terminal: TerminalCall | None = None
-            screenshot_path: str | None = None
             guided = False
             turn_events: list[dict[str, Any]] = []
             for call in tool_calls:
@@ -219,10 +221,6 @@ class AgentLoop:
                             result = dict(result)
                             result["focus_guard"] = restored
                     tool_body = compact_json(result)
-                    if name == "screenshot_region" and result.get("ok") and result.get("path"):
-                        screenshot_path = str(result["path"])
-                    if isinstance(result, dict) and result.get("screenshot") and not screenshot_path:
-                        screenshot_path = str(result["screenshot"])
                     if isinstance(result, dict) and result.get("nav_failed"):
                         self._log("error", result.get("reason") or "nav_failed")
                     self._remember_target_from_result(name, result)
@@ -254,19 +252,14 @@ class AgentLoop:
                 self._clear_guide()
                 return RunResult("fail", msg, step, self.backend.dry_run)
 
-            if screenshot_path:
-                image_msg = self._maybe_image_message(screenshot_path)
-                if image_msg:
-                    self._messages.append(image_msg)
-
-            snapshot = self.backend.list_ui()
+            snapshot, scene = self._observe_pair()
             self._last_snapshot = snapshot
+            self._last_scene = scene
             self._remember_target(snapshot)
-            from desk_pilot.agent.canvas import art_subject, playbook_hint, should_use_canvas_mode
+            from desk_pilot.agent.canvas import art_subject, playbook_hint
 
-            if (not self.guide_mode) and should_use_canvas_mode(getattr(self, "_goal", ""), snapshot):
-                self._enable_canvas("thin UIA tree after action")
             self._log("observe", f"Window: {self._window_label(snapshot)}")
+            self._log_scene(scene)
             if snapshot.get("com_error"):
                 self._log("error", snapshot.get("error") or "list_ui COM failure")
             playbook = ""
@@ -287,11 +280,10 @@ class AgentLoop:
                         canvas=self.canvas_mode,
                         playbook=playbook,
                         notice=notice,
+                        scene=scene,
                     ),
                 }
             )
-            if not screenshot_path:
-                self._attach_canvas_screenshot(snapshot)
             self._messages = trim_messages(sanitize_messages(self._messages))
             if guided:
                 continue
@@ -467,7 +459,12 @@ class AgentLoop:
             {
                 "role": "user",
                 "content": user_goal_message(
-                    goal, snapshot, self.backend.dry_run, guide=self.guide_mode, canvas=self.canvas_mode
+                    goal,
+                    snapshot,
+                    self.backend.dry_run,
+                    guide=self.guide_mode,
+                    canvas=self.canvas_mode,
+                    scene=getattr(self, "_last_scene", None),
                 )
                 + extra,
             },
@@ -492,8 +489,6 @@ class AgentLoop:
             snap = getattr(self, "_last_snapshot", None)
             if looks_like_navigation(text, snap if isinstance(snap, dict) else None):
                 self._pending_nav_text = text
-            if looks_like_image_path(text):
-                self._pending_save_path = text.strip().strip('"')
             return dispatch_tool(self.backend, name, args, extra=extra)
         if (
             name == "hotkey"
@@ -517,55 +512,73 @@ class AgentLoop:
                 log=self._log,
             )
             self._pending_nav_text = None
-            return self._maybe_verify_saved_image(checked, keys)
-        result = dispatch_tool(self.backend, name, args, extra=extra)
-        if isinstance(result, TerminalCall):
-            return result
-        if name == "hotkey" and keys in {"ctrl+s"}:
-            result = self._annotate_ctrl_s(result if isinstance(result, dict) else {"ok": bool(result)})
-        if name == "hotkey" and keys in {"enter", "return", "ctrl+s"}:
-            result = self._maybe_verify_saved_image(
-                result if isinstance(result, dict) else {"ok": bool(result)},
-                keys,
-            )
-        return result
+            return checked
+        return dispatch_tool(self.backend, name, args, extra=extra)
 
-    def _annotate_ctrl_s(self, result: dict[str, Any]) -> dict[str, Any]:
-        payload = dict(result)
-        if is_image_download_goal(getattr(self, "_goal", "")):
-            warning = (
-                "ctrl+s on a search/results page saves HTML, not an image. "
-                "Open the image and use Save image as / a download control, then verify_file."
-            )
-            payload["warning"] = warning
-            self._log("act", warning)
-        return payload
+    def _observe_pair(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """UIA dump overlapped with FastVLM /scene. Scene is ready before PLAN."""
+        box: list[int] | None = None
+        try:
+            box = self.backend.focused_window_rect()
+        except Exception:
+            box = None
+        holder: dict[str, Any] = {}
 
-    def _maybe_verify_saved_image(self, result: dict[str, Any], keys: str) -> dict[str, Any]:
-        path = getattr(self, "_pending_save_path", None)
-        if not path:
-            return result
-        if keys not in {"enter", "return", "ctrl+s"}:
-            return result
-        if not (is_image_download_goal(getattr(self, "_goal", "")) or looks_like_image_path(path)):
-            return result
-        checked = verify_file(path, expect="image")
-        payload = dict(result)
-        payload["verify_file"] = checked
-        if not checked.get("ok"):
-            payload["ok"] = False
-            payload["error"] = checked.get("error") or "Saved file is not a real image."
-            self._log("error", payload["error"])
-        self._pending_save_path = None
-        return payload
+        def run_scene() -> None:
+            holder["scene"] = self._infer_scene(snapshot=None, box=box)
 
-    def _enable_canvas(self, reason: str) -> None:
-        if self.guide_mode or self.canvas_mode:
+        worker: threading.Thread | None = None
+        if self._scene_enabled() and box:
+            worker = threading.Thread(target=run_scene, name="fastvlm-scene", daemon=True)
+            worker.start()
+        snapshot = self.backend.list_ui()
+        if worker is not None:
+            worker.join(timeout=45)
+            scene = holder.get("scene")
+            if scene is None:
+                scene = self._infer_scene(snapshot=snapshot, box=None)
+        elif self._scene_enabled():
+            scene = self._infer_scene(snapshot=snapshot, box=None)
+        else:
+            scene = None
+        if isinstance(snapshot, dict) and isinstance(scene, dict) and not scene.get("window"):
+            window = snapshot.get("window") if isinstance(snapshot.get("window"), dict) else {}
+            title = str((window or {}).get("name") or "")
+            if title:
+                scene = dict(scene)
+                scene["window"] = title
+        return snapshot, scene if isinstance(scene, dict) else None
+
+    def _scene_enabled(self) -> bool:
+        return self.scene_client is not None
+
+    def _infer_scene(self, *, snapshot: dict[str, Any] | None, box: list[int] | None) -> dict[str, Any] | None:
+        client = self.scene_client
+        if client is None:
+            return None
+        from desk_pilot.vision.capture import capture_content_screenshot
+        from desk_pilot.vision.scene import empty_scene
+
+        captured = capture_content_screenshot(self.backend, snapshot, box=box)
+        region = captured.get("region") if isinstance(captured.get("region"), dict) else None
+        window = str(captured.get("window") or "")
+        if not captured.get("ok"):
+            note = str(captured.get("error") or "capture failed")
+            self._log("observe", f"scene capture skipped: {note}")
+            return empty_scene(window=window, region=region, note=note)
+        try:
+            return client.infer_scene(path=str(captured.get("path") or ""), window=window, region=region)
+        except Exception as exc:  # noqa: BLE001
+            self._log("error", f"FastVLM scene failed: {exc}")
+            return empty_scene(window=window, region=region, note=f"scene failed: {exc}")
+
+    def _log_scene(self, scene: dict[str, Any] | None) -> None:
+        if not scene:
             return
-        self.canvas_mode = True
-        self._log("info", f"Canvas mode: {reason} — vision + drag.")
-        if self._messages and self._messages[0].get("role") == "system":
-            self._messages[0] = {"role": "system", "content": CANVAS_SYSTEM_PROMPT}
+        count = len(scene.get("elements") or [])
+        note = str(scene.get("note") or "")
+        extra = f" · {note}" if note else ""
+        self._log("observe", f"scene: {count} elements{extra}")
 
     def _window_rect(self) -> list[int] | None:
         from desk_pilot.agent.canvas import window_rect_from_snapshot
@@ -621,57 +634,6 @@ class AgentLoop:
         )
         self._log("act", f"focus guard: Desk Pilot had focus; restored {title!r}")
         return result if isinstance(result, dict) else {"ok": bool(result), "window": title}
-
-    def _attach_canvas_screenshot(self, snapshot: dict[str, Any] | None) -> None:
-        from desk_pilot.agent.canvas import is_browser_or_whiteboard, window_rect_from_snapshot
-
-        if self.guide_mode or not self.canvas_mode:
-            return
-        if not snapshot:
-            return
-        if not is_browser_or_whiteboard(snapshot):
-            return
-        box = window_rect_from_snapshot(snapshot)
-        if not box:
-            return
-        left, top, right, bottom = box
-        width, height = max(1, right - left), max(1, bottom - top)
-        try:
-            captured = self.backend.screenshot_region(left, top, width, height)
-        except Exception as exc:  # noqa: BLE001
-            self._log("error", f"canvas screenshot failed: {exc}")
-            return
-        if not (captured.get("ok") and captured.get("path")):
-            return
-        image_msg = self._maybe_image_message(
-            str(captured["path"]),
-            caption="Canvas screenshot attached. UIA is thin; plan drag strokes from this image.",
-        )
-        if image_msg:
-            self._messages.append(image_msg)
-
-    def _maybe_image_message(self, path: str, caption: str | None = None) -> dict[str, Any] | None:
-        file = Path(path)
-        if not file.is_file():
-            return None
-        try:
-            raw = file.read_bytes()
-        except OSError:
-            return None
-        label = caption or f"Region screenshot attached ({file.name})."
-        if len(raw) > 1_200_000:
-            return {
-                "role": "user",
-                "content": f"Screenshot saved at {path} (too large to attach).",
-            }
-        b64 = base64.b64encode(raw).decode("ascii")
-        return {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": label},
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-            ],
-        }
 
     def _window_label(self, snapshot: dict[str, Any]) -> str:
         window = snapshot.get("window") or {}

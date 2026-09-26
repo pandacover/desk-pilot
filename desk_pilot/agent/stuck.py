@@ -11,8 +11,8 @@ IGNORE_TOOLS = frozenset({"done", "fail", "guide_step"})
 STUCK_MESSAGE = (
     "STUCK: the same tool+args failed, or the UI snapshot fingerprint did not change, "
     "for 3 consecutive acts. You MUST change strategy now: pick a different tool "
-    "(find_files if locating a file/.exe on this computer, screenshot_region to see the "
-    "real screen, or fail with a concrete reason). Do not grind Explorer/Start search "
+    "(find_files if locating a file/.exe on this computer, a different scene-element click, "
+    "or fail with a concrete reason). Do not grind Explorer/Start search "
     "when the search box is not focused. Do not Win+S a filename into Edge web search."
 )
 

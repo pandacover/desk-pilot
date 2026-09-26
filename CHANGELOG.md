@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.5
+
+- **FastVLM scene observe**: after each ACT, capture a compressed crop of the focused window/content region and POST it to a local FastVLM sidecar (`apple/FastVLM-0.5B`). OBSERVE includes UIA plus compact `scene:` JSON (element boxes, labels, click centers; cap 20). The OpenRouter planner does **not** receive raw screenshots by default. Scene inference overlaps `list_ui` so it is ready before PLAN.
+- **UI does not wait on model load**: the window opens immediately; the sidecar starts afterward. Status shows **Loading vision model…** until `GET /health` is `ready`. **Run** stays disabled until then (or until FastVLM is turned off in Settings / `DESK_PILOT_FASTVLM=0`). Torch stays in the sidecar process.
+- **Removed thin-UIA canvas auto-flip** that forced vision+drag on browser goals. Canvas mode is art/sketch/draw goals only. Visual/thin trees use FastVLM scene in the normal loop.
+- **Removed screenshot-to-LLM** (canvas window attach and `screenshot_region` image dumps). `screenshot_region` remains as a disk crop last resort.
+- **No verify_file spam / Google Images recipes** in the loop. `verify_file` stays an optional tool. No CDP/Playwright.
+- **Sidecar**: `python -m desk_pilot.vision.sidecar` — `GET /health` (`loading|ready|error`), `POST /scene`. `--stub` for dry-run/CI without weights. Optional `requirements-vision.txt`. CPU is OK; first load is slow.
+
 ## 0.2.4
 
 - **navigate types the held UIA handle**: after resolving the address control, do not call generic `type_text` (which re-looks-up by automation_id/name and can return `Target control not found for type_text`). SetFocus + ValuePattern/SendKeys on that same element. If the handle is stale or typing it fails, fall through to the omnibox path (`ctrl+l`, type, Enter) inside the same call. That missing-target error never reaches the planner or live ERROR log.

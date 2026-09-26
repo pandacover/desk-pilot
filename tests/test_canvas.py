@@ -36,13 +36,14 @@ class CanvasDetectTests(unittest.TestCase):
         self.assertFalse(is_guide_goal("draw me a car"))
         self.assertTrue(is_guide_goal("how to sketch a car"))
 
-    def test_thin_tldraw_tree_enables_canvas(self) -> None:
+    def test_thin_tldraw_tree_does_not_auto_canvas(self) -> None:
         desk = MockDesktop()
         desk._open_tldraw()
         tree = desk.list_ui()
         self.assertLessEqual(len(tree["controls"]), 10)
         self.assertTrue(is_thin_tree(tree))
-        self.assertTrue(should_use_canvas_mode("click around", tree))
+        self.assertFalse(should_use_canvas_mode("click around", tree))
+        self.assertFalse(should_use_canvas_mode("search for a cat picture", tree))
         self.assertTrue(should_use_canvas_mode("open tldraw and sketch me a car", tree))
 
     def test_car_playbook_has_body_and_wheels(self) -> None:
@@ -90,6 +91,20 @@ def _call(name: str, arguments: str, call_id: str = "c1") -> dict[str, Any]:
 
 
 class CanvasLoopTests(unittest.TestCase):
+    def test_thin_browser_goal_stays_out_of_canvas_mode(self) -> None:
+        llm = ScriptedLLM(
+            [{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]
+        )
+        desk = MockDesktop()
+        desk._open_tldraw()
+        from desk_pilot.vision.client import StubSceneClient
+
+        loop = AgentLoop(backend=desk, llm=llm, max_steps=3, scene_client=StubSceneClient())
+        result = loop.run("search for a cat picture")
+        self.assertEqual(result.status, "done")
+        self.assertFalse(loop.canvas_mode)
+        self.assertFalse(loop.guide_mode)
+
     def test_art_goal_uses_canvas_prompt_and_drag_tool(self) -> None:
         llm = ScriptedLLM(
             [{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]

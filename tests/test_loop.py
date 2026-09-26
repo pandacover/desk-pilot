@@ -1,3 +1,4 @@
+import json
 import unittest
 from typing import Any
 
@@ -322,13 +323,13 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("STUCK", user_text)
         self.assertIn("find_files", user_text)
 
-    def test_ctrl_s_image_goal_warns(self) -> None:
+    def test_ctrl_s_does_not_auto_verify_file(self) -> None:
         llm = ScriptedLLM(
             [
                 {"content": "", "tool_calls": [_call("hotkey", '{"keys":"ctrl+s"}', "1")]},
                 {
                     "content": "",
-                    "tool_calls": [_call("fail", '{"reason":"ctrl+s would save HTML"}', "2")],
+                    "tool_calls": [_call("done", '{"result":"saved"}', "2")],
                 },
             ]
         )
@@ -339,8 +340,78 @@ class AgentLoopTests(unittest.TestCase):
             max_steps=6,
             on_log=lambda k, m: logs.append((k, m)),
         ).run("download a picture of a cat")
-        self.assertEqual(result.status, "fail")
-        self.assertTrue(any("html" in m.lower() for _, m in logs))
+        self.assertEqual(result.status, "done")
+        joined = " ".join(m for _, m in logs).lower()
+        self.assertNotIn("verify_file", joined)
+
+    def test_observe_includes_scene_json_not_image(self) -> None:
+        class RecordingLLM(ScriptedLLM):
+            def __init__(self, script):
+                super().__init__(script)
+                self.payloads: list[list[dict[str, Any]]] = []
+
+            def complete(self, messages, tools):
+                self.payloads.append(messages)
+                return super().complete(messages, tools)
+
+        from desk_pilot.vision.client import StubSceneClient
+
+        llm = RecordingLLM(
+            [{"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]}]
+        )
+        scene_client = StubSceneClient(
+            {
+                "elements": [
+                    {
+                        "id": "img_0",
+                        "label": "Start",
+                        "role": "button",
+                        "box": [0, 1040, 48, 1080],
+                        "click": [24, 1060],
+                    }
+                ]
+            }
+        )
+        result = AgentLoop(
+            backend=MockDesktop(),
+            llm=llm,
+            max_steps=3,
+            scene_client=scene_client,
+        ).run("Click Start")
+        self.assertEqual(result.status, "done")
+        self.assertTrue(scene_client.calls)
+        blob = json.dumps(llm.payloads)
+        self.assertNotIn("image_url", blob)
+        user_text = " ".join(
+            str(m.get("content") or "") for payload in llm.payloads for m in payload if m.get("role") == "user"
+        )
+        self.assertIn("scene:", user_text)
+        self.assertIn("img_0", user_text)
+
+    def test_screenshot_region_does_not_dump_pixels_to_planner(self) -> None:
+        class RecordingLLM(ScriptedLLM):
+            def __init__(self, script):
+                super().__init__(script)
+                self.payloads: list[list[dict[str, Any]]] = []
+
+            def complete(self, messages, tools):
+                self.payloads.append(messages)
+                return super().complete(messages, tools)
+
+        llm = RecordingLLM(
+            [
+                {
+                    "content": "",
+                    "tool_calls": [_call("screenshot_region", '{"x":0,"y":0,"width":40,"height":20}', "1")],
+                },
+                {"content": "", "tool_calls": [_call("done", '{"result":"ok"}', "z")]},
+            ]
+        )
+        result = AgentLoop(backend=MockDesktop(), llm=llm, max_steps=5).run("look at the screen")
+        self.assertEqual(result.status, "done")
+        blob = json.dumps(llm.payloads)
+        self.assertNotIn("image_url", blob)
+        self.assertNotIn("data:image", blob)
 
 
 if __name__ == "__main__":

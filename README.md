@@ -1,8 +1,10 @@
 # Desk Pilot
 
-Local **Windows computer-use agent**. You type a goal, Desk Pilot reads the focused window with UI Automation, plans with an OpenRouter LLM (`openai/gpt-6-luna` by default), then clicks and types. After every action it re-reads the UI. Hard stop at 30 steps (configurable), plus a large **STOP** button.
+Local **Windows computer-use agent**. You type a goal, Desk Pilot reads the focused window with UI Automation, captures a compressed screenshot of the content region, and runs **Apple FastVLM** (local sidecar) to extract a compact JSON scene (element boxes, labels, click centers). That **text** goes to the OpenRouter planner (`openai/gpt-6-luna` by default) — not raw images. After every action it re-reads the UI and refreshes the scene. Hard stop at 30 steps (configurable), plus a large **STOP** button.
 
-On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fake in-memory Windows session (Start, Run dialog, Notepad) so you can develop and CI without a Windows box.
+The app window opens immediately. FastVLM loads in a background sidecar after the UI is shown (status: **Loading vision model…**, then **Vision ready**). **Run** stays disabled until the sidecar reports ready, unless you turn FastVLM off in Settings.
+
+On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fake in-memory Windows session (Start, Run dialog, Notepad) so you can develop and CI without a Windows box. Dry-run uses a FastVLM **stub** sidecar (no PyTorch weights) so the window still opens instantly.
 
 ## Requirements
 
@@ -17,8 +19,13 @@ On Linux and macOS the same app starts in **dry-run** mode: the desktop is a fak
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -r requirements.txt
+pip install -r requirements-vision.txt   # FastVLM sidecar (PyTorch + transformers)
 python -m desk_pilot
 ```
+
+The first FastVLM start downloads **apple/FastVLM-0.5B** from Hugging Face (~1GB) into the Hugging Face cache. Load happens in the sidecar process after the Desk Pilot window appears — the UI is not blocked. CPU is OK (first load is slow); CUDA is used when available.
+
+To skip vision: Settings **FastVLM scene observe** off, or `DESK_PILOT_FASTVLM=0`. Observe then uses UIA only. `python -m desk_pilot.vision.sidecar --stub` serves empty scenes without weights.
 
 Or: `python run.py`
 
@@ -32,15 +39,16 @@ pip install -r requirements.txt
 python -m desk_pilot
 ```
 
-The status chip will say **DRY-RUN**. Mouse and keyboard are not moved.
+Dry-run starts a FastVLM **stub** sidecar (no PyTorch). The chip says **DRY-RUN · Vision stub**. Mouse and keyboard are not moved.
 
 ## First run
 
-1. Open Desk Pilot.
-2. In **Settings**, paste your OpenRouter API key (masked). Optional: override the model. Click **Save settings**.
-3. Leave the goal as `Open Notepad and type hello` (or write your own).
-4. Click **Run**. Confirm the dialog. Watch the step log.
-5. Hit **STOP** at any time. Esc also requests a stop.
+1. Open Desk Pilot (the window should appear immediately; the status chip may say **Loading vision model…**).
+2. Wait until the chip says **Vision ready** (or **Vision stub** on dry-run). Run is enabled then.
+3. In **Settings**, paste your OpenRouter API key (masked). Optional: override the model. Click **Save settings**.
+4. Leave the goal as `Open Notepad and type hello` (or write your own).
+5. Click **Run**. Confirm the dialog. Watch the step log (OBSERVE includes `scene:` JSON).
+6. Hit **STOP** at any time. Esc also requests a stop.
 
 The key is stored only in your user config:
 
@@ -50,9 +58,9 @@ The key is stored only in your user config:
 | Linux | `~/.config/desk-pilot/config.json` |
 | macOS | `~/Library/Application Support/DeskPilot/config.json` |
 
-Power users can set `OPENROUTER_API_KEY` in the environment; that **overrides** the saved key. The key is never hardcoded and must not be committed.
+Power users can set `OPENROUTER_API_KEY` in the environment; that **overrides** the saved key. The key is never hardcoded and must not be committed. `DESK_PILOT_FASTVLM=0` disables the sidecar; `DESK_PILOT_FASTVLM_STUB=1` forces stub scenes; `DESK_PILOT_FASTVLM_URL` overrides `http://127.0.0.1:8765`.
 
-Region screenshots (mss, only when UIA cannot find a control) go to `%LOCALAPPDATA%\DeskPilot\screenshots\` on Windows, or `~/.cache/desk-pilot/screenshots/` elsewhere.
+Region screenshots (mss crop for FastVLM, and the last-resort `screenshot_region` tool) go to `%LOCALAPPDATA%\DeskPilot\screenshots\` on Windows, or `~/.cache/desk-pilot/screenshots/` elsewhere. Sidecar logs: `fastvlm-sidecar.log` in that cache dir.
 
 ## CLI
 
@@ -61,6 +69,7 @@ Same loop, no window. Still needs an API key.
 ```bash
 python -m desk_pilot --cli --goal "Open Notepad and type hello"
 python -m desk_pilot --cli --mock --goal "Open Notepad and type hello"
+python -m desk_pilot --cli --no-fastvlm --goal "Open Notepad and type hello"
 ```
 
 `--mock` forces the dry-run desktop even on Windows.
@@ -68,8 +77,10 @@ python -m desk_pilot --cli --mock --goal "Open Notepad and type hello"
 ## How it works
 
 ```
-observe (UIA tree) → plan (OpenRouter tools) → act (click / type / hotkey / drag) → verify → repeat
+observe (UIA tree + FastVLM scene JSON) → plan (OpenRouter tools, no image) → act → observe → repeat
 ```
+
+After each ACT settles, Desk Pilot captures a compressed crop of the focused window/content region and POSTs it to the local FastVLM sidecar (`POST /scene`) **in parallel** with `list_ui`, so the scene is ready before PLAN. The planner sees `scene:` compact JSON (cap ~20 elements, screen coords) — not a screenshot.
 
 Tools the model can call:
 
@@ -85,8 +96,8 @@ Tools the model can call:
 | `list_windows` / `focus_window` | Reuse an already-open app instead of launching another copy |
 | `launch_app` | Start an installed app, or focus it if it is already running |
 | `find_files` | Local disk search (Desktop, Documents, Downloads, Program Files, Steam). Auto mode; use this to locate a file/.exe |
-| `verify_file` | After an image save: reject HTML masquerading as `.jpg` |
-| `screenshot_region` | mss crop; last resort except in canvas mode |
+| `verify_file` | Optional: after an image save, reject HTML masquerading as `.jpg` (do not spam every step) |
+| `screenshot_region` | mss crop to disk; last resort. Observe already includes FastVLM scene; this does **not** send pixels to the planner |
 | `wait_for_window` | Title / focus change |
 | `done` / `fail` | End the run |
 
@@ -96,7 +107,25 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 
 Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` → `done` with the full paths. Not Win+S, not Edge, not Explorer search.
 
-The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once. Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once (and refreshes the FastVLM scene). Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+
+## Pull latest (0.2.5)
+
+FastVLM scene observe. Thin-UIA canvas auto-flip and screenshot-to-LLM are gone. The planner gets FastVLM JSON, not pixels.
+
+```powershell
+git pull
+pip install -r requirements.txt
+pip install -r requirements-vision.txt
+python -m desk_pilot
+```
+
+Expect:
+
+1. The Desk Pilot window appears immediately. Status shows **Loading vision model…** then **Vision ready** (or **Vision stub** on Linux dry-run). Run is disabled until then.
+2. OBSERVE log lines include `scene: N elements`. Planner messages contain `scene:` JSON, not `image_url`.
+3. Browser goals with a thin UIA tree stay in normal mode (use scene click centers) — they must **not** auto-flip to Canvas mode. Art goals (`sketch me a car`) still use canvas + drag.
+4. No CDP/Playwright.
 
 ## Pull latest (0.2.4)
 
@@ -112,7 +141,7 @@ Try (auto, not Guide):
 
 1. Any goal that needs opening a URL in Helium — expect a single `navigate` act. It must not abort with `Target control not found for type_text` or `missing address control`.
 2. `find brawlhalla.exe on my computer` — expect `find_files` to return real paths in the step log. It must **not** open Edge via Win+S or type the filename into web search.
-3. `download a picture of a cat` (or similar) — it must **not** Ctrl+S a Google/Images results page and rename HTML to `.jpg`. Open the image, Save image as / download control, then `verify_file`.
+3. `download a picture of a cat` (or similar) — use FastVLM scene tiles to open an image. It must **not** Ctrl+S a results page and rename HTML to `.jpg`.
 
 ## Auto vs Guide
 
@@ -125,19 +154,18 @@ observe → plan one human step → sketch → you act → Continue → next ste
 
 ## Canvas mode (tldraw / Figma / Paint)
 
-UIA cannot see a whiteboard. A live tldraw tab is ~10 chrome controls and no Draw tool. Canvas mode turns on when the goal matches sketch/draw/paint/tldraw/Figma/canvas, or when the focused window is a browser/whiteboard with a thin tree.
+UIA cannot see a whiteboard. Canvas mode turns on **only** when the goal matches sketch/draw/paint/tldraw/Figma/canvas — not because a browser tree is thin. Visual pages (image grids, photo viewers) stay in the normal loop and use FastVLM scene JSON to click.
 
 Then Desk Pilot:
 
-1. Biases the model to **screenshots + `drag`**, not more `list_ui` clicks.
-2. Attaches a window screenshot after observations on that surface.
-3. Lets the model emit several `drag`s in one turn (body rect, cabin, wheel ellipses).
-4. Restores the target window if Desk Pilot steals focus after a click.
-5. Prefers **create-then-insert**: `prepare_art` (OpenRouter image if the key supports `/images/generations`, else a geometric PNG/SVG). On Windows the PNG is copied to the clipboard (`ctrl+v`). If image gen or clipboard paste is unavailable, the fail is explicit and the geometric drag playbook is the fallback.
+1. Biases the model to **scene JSON + `drag`**, not more `list_ui` clicks and not raw screenshots in the chat.
+2. Lets the model emit several `drag`s in one turn (body rect, cabin, wheel ellipses).
+3. Restores the target window if Desk Pilot steals focus after a click.
+4. Prefers **create-then-insert**: `prepare_art` (OpenRouter image if the key supports `/images/generations`, else a geometric PNG/SVG). On Windows the PNG is copied to the clipboard (`ctrl+v`). If image gen or clipboard paste is unavailable, the fail is explicit and the geometric drag playbook is the fallback.
 
 ## Pull latest (0.2.0-rc)
 
-Canvas drawing: drag tool, thin-tree routing, focus guard, art-goal paste/playbook.
+Canvas drawing: drag tool, art-goal routing, focus guard. Thin-tree auto-mode was removed in 0.2.5 (FastVLM scene observe).
 
 ```powershell
 git pull
@@ -148,7 +176,7 @@ python -m desk_pilot
 Then try **auto** (not Guide): `open tldraw and sketch me a car`.
 
 1. A browser should open (or focus) [tldraw.com](https://www.tldraw.com).
-2. The log should say **Canvas mode**, then `drag` strokes or `prepare_art` + `ctrl+v` — not a dozen chrome clicks.
+2. The log should say **Canvas mode**, then `drag` strokes or `prepare_art` + `ctrl+v` — not a dozen chrome clicks. OBSERVE should include FastVLM `scene:` JSON rather than attaching a screenshot to the planner.
 3. If paste is unavailable, you should still get a recognizable car from a few geometric drags (body + wheels), not 20 blind clicks.
 4. If Desk Pilot steals focus, the next line should restore the tldraw window.
 
@@ -259,4 +287,5 @@ desk_pilot/
   agent/      observe–plan–act–verify loop and tool schemas
   desktop/    Windows UIA backend + Linux/macOS mock
   llm/        OpenRouter OpenAI-compatible client
+  vision/     FastVLM sidecar (HTTP /health, /scene) + scene JSON client
 ```

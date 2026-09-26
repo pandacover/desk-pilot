@@ -7,14 +7,19 @@ class ImportSmokeTests(unittest.TestCase):
         from desk_pilot.desktop import get_backend
 
         self.assertEqual(desk_pilot.DEFAULT_MODEL, "openai/gpt-6-luna")
-        self.assertEqual(desk_pilot.__version__, "0.2.4")
+        self.assertEqual(desk_pilot.__version__, "0.2.5")
         backend = get_backend(force_mock=True)
         self.assertTrue(backend.dry_run)
         tree = backend.list_ui()
         self.assertIn("controls", tree)
 
     def test_ui_module_imports(self) -> None:
-        from desk_pilot.app import ui
+        try:
+            from desk_pilot.app import ui
+        except ModuleNotFoundError as exc:
+            if "tkinter" in str(exc):
+                self.skipTest("tkinter (python3-tk) is not installed in this environment")
+            raise
 
         self.assertTrue(hasattr(ui, "DeskPilotApp"))
         self.assertTrue(hasattr(ui, "run_app"))

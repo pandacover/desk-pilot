@@ -1,4 +1,8 @@
-"""Canvas / thin-tree mode: vision + drag when UIA cannot see a drawing surface."""
+"""Art/canvas mode: drag + prepare_art when the user asked to sketch/draw.
+
+Thin browser trees no longer auto-flip into this mode — FastVLM scene JSON
+covers visual pages. Keep the helpers for content-region crop and playbooks.
+"""
 
 from __future__ import annotations
 
@@ -95,12 +99,9 @@ def is_thin_tree(snapshot: dict[str, Any] | None, *, max_controls: int = THIN_TR
 
 
 def should_use_canvas_mode(goal: str, snapshot: dict[str, Any] | None = None) -> bool:
-    """Art goal, or a browser/whiteboard whose UIA tree is chrome-only."""
-    if is_art_goal(goal):
-        return True
-    if snapshot is None:
-        return False
-    return is_thin_tree(snapshot) and is_browser_or_whiteboard(snapshot)
+    """Art/sketch/draw goals only. Thin UIA trees use FastVLM scene observe instead."""
+    del snapshot  # kept so callers that pass a tree do not break
+    return is_art_goal(goal)
 
 
 def window_rect_from_snapshot(snapshot: dict[str, Any] | None) -> list[int] | None:
@@ -255,7 +256,7 @@ def playbook_hint(subject: str, window_rect: list[int] | None) -> str:
     strokes = stroke_playbook(subject, window_rect)
     if not strokes:
         return (
-            "Canvas mode: list_ui is chrome-only. Screenshot the window, then drag. "
+            "Canvas mode: list_ui is chrome-only. Use FastVLM scene JSON, then drag. "
             "You may emit several drag calls in this turn (body, then wheels)."
         )
     lines = [

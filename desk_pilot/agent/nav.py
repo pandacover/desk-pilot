@@ -632,7 +632,9 @@ def verify_enter_navigation(
     result["reason"] = fail_reason
     if shot and shot.get("ok") and shot.get("path"):
         result["screenshot"] = shot.get("path")
-        result["hint"] = "Do not claim the page loaded. Title/address were stale; inspect the screenshot."
+        result["hint"] = (
+            "Do not claim the page loaded. Title/address were stale; use the next FastVLM scene JSON."
+        )
     else:
         result["hint"] = "Do not claim the page loaded — window title/address did not change toward the URL."
     return result
