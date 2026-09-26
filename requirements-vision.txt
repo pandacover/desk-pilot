@@ -1,7 +1,7 @@
 # Optional FastVLM sidecar (separate process — the Desk Pilot UI never imports torch).
 # CPU is OK. apple/FastVLM-0.5B first load is slow (~1GB download). After load:
-#   CUDA: typically ~1–3s per POST /scene (768px crop, greedy, ≤192 new tokens).
-#   CPU:  typically ~5–15s after warmup (512px crop); first generate is slower.
+#   CUDA / CPU: native 1024px FastVLM crop, greedy, ≤192 new tokens, JSON early-stop.
+#   Do not shrink below 1024px — 768px encode yields FastViT 12×12 features that pool to 0×0.
 # The sidecar logs /scene start/end elapsed_ms to fastvlm-sidecar.log.
 # Optional CUDA 8-bit: DESK_PILOT_FASTVLM_8BIT=1 (needs bitsandbytes; often fails on Windows).
 #

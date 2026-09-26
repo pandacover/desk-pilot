@@ -8,10 +8,12 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 DEFAULT_MODEL_ID = "apple/FastVLM-0.5B"
 MAX_ELEMENTS = 20
-# FastVLM-0.5B native crop is 1024²; shrinking before encode is the CPU win.
-SCENE_MAX_EDGE = 768
-SCENE_MAX_EDGE_CPU = 512
-# Compact scene JSON is small. Official HF snippet uses 128; we were at 512 (minutes on CPU).
+# apple/FastVLM-0.5B preprocessor crop is 1024². FastViTHD downsamples /64:
+# 1024 → 16×16 features; 768 → 12×12 which then pools to (3072×0×0).
+SCENE_NATIVE_CROP = 1024
+SCENE_MAX_EDGE = SCENE_NATIVE_CROP
+SCENE_MIN_TOWER_EDGE = SCENE_NATIVE_CROP
+# Compact scene JSON is small. Official HF snippet uses 128; keep greedy + JSON stop.
 SCENE_MAX_NEW_TOKENS = 192
 HEALTH_STATUSES = ("loading", "ready", "busy", "error")
 

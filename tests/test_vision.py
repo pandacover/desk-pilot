@@ -209,6 +209,24 @@ class CaptureTests(unittest.TestCase):
         self.assertLessEqual(max(out.size), 512)
         self.assertEqual(out.size[0] / out.size[1], 2)
 
+    def test_ensure_min_edge_upscales_small_shots(self) -> None:
+        from PIL import Image
+
+        from desk_pilot.vision.capture import ensure_min_edge
+
+        image = Image.new("RGB", (400, 200), "red")
+        out = ensure_min_edge(image, 1024)
+        self.assertGreaterEqual(max(out.size), 1024)
+
+    def test_tower_spatial_ok_rejects_768_and_12x12(self) -> None:
+        from desk_pilot.vision.capture import tower_spatial_ok
+
+        # Live CUDA error: 768px encode → FastViT 12×12 features → pool to 0×0.
+        self.assertFalse(tower_spatial_ok(12, 12, min_edge=1024))
+        self.assertFalse(tower_spatial_ok(768, 768, min_edge=1024))
+        self.assertTrue(tower_spatial_ok(1024, 1024, min_edge=1024))
+        self.assertTrue(tower_spatial_ok(1024, 1024))
+
 
 class ConfigFastvlmTests(unittest.TestCase):
     def test_env_disables_fastvlm(self) -> None:
@@ -262,14 +280,25 @@ class HealthErrorChipTests(unittest.TestCase):
         self.assertTrue(manager.is_ready())
 
     def test_scene_speed_constants(self) -> None:
-        from desk_pilot.vision import SCENE_MAX_EDGE, SCENE_MAX_EDGE_CPU, SCENE_MAX_NEW_TOKENS
+        from desk_pilot.vision import SCENE_MAX_EDGE, SCENE_MIN_TOWER_EDGE, SCENE_NATIVE_CROP, SCENE_MAX_NEW_TOKENS
 
-        self.assertGreaterEqual(SCENE_MAX_EDGE_CPU, 512)
-        self.assertLessEqual(SCENE_MAX_EDGE_CPU, 768)
-        self.assertGreaterEqual(SCENE_MAX_EDGE, 512)
-        self.assertLessEqual(SCENE_MAX_EDGE, 768)
+        self.assertEqual(SCENE_NATIVE_CROP, 1024)
+        self.assertGreaterEqual(SCENE_MAX_EDGE, 1024)
+        self.assertGreaterEqual(SCENE_MIN_TOWER_EDGE, 1024)
         self.assertGreaterEqual(SCENE_MAX_NEW_TOKENS, 128)
         self.assertLessEqual(SCENE_MAX_NEW_TOKENS, 256)
+
+    def test_processor_crop_never_below_native(self) -> None:
+        from types import SimpleNamespace
+
+        from desk_pilot.vision.sidecar import _processor_crop_edge
+
+        self.assertEqual(
+            _processor_crop_edge(SimpleNamespace(crop_size={"height": 1024, "width": 1024})),
+            1024,
+        )
+        self.assertEqual(_processor_crop_edge(SimpleNamespace(crop_size={"height": 768, "width": 768})), 1024)
+        self.assertEqual(_processor_crop_edge(SimpleNamespace()), 1024)
 
     def test_health_busy_payload(self) -> None:
         from desk_pilot.vision.sidecar import enter_stub, health_payload, set_state
