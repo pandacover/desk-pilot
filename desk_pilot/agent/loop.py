@@ -41,6 +41,7 @@ from desk_pilot.agent.nav import looks_like_navigation, nav_fingerprint, verify_
 from desk_pilot.agent.stuck import StuckTracker, snapshot_fingerprint
 from desk_pilot.desktop.base import DesktopBackend
 from desk_pilot.llm.openrouter import LLMClient, LLMError
+from desk_pilot.vision.client import SCENE_INFER_TIMEOUT
 
 
 LogFn = Callable[[str, str], None]
@@ -71,6 +72,7 @@ class AgentLoop:
     guide_mode: bool = False
     canvas_mode: bool = False
     scene_client: Any | None = None
+    scene_timeout: float = SCENE_INFER_TIMEOUT
     _target_title: str = ""
     _target_process: str = ""
     _last_scene: dict[str, Any] | None = None
@@ -105,6 +107,9 @@ class AgentLoop:
             self._log("info", "Dry-run desktop: actions are simulated, not sent to the OS.")
 
         snapshot, scene = self._observe_pair()
+        if self._stopped():
+            self._clear_guide()
+            return RunResult("stopped", "Stopped by user.", 0, self.backend.dry_run)
         self._last_snapshot = snapshot
         self._last_scene = scene
         self._remember_target(snapshot)
@@ -253,6 +258,9 @@ class AgentLoop:
                 return RunResult("fail", msg, step, self.backend.dry_run)
 
             snapshot, scene = self._observe_pair()
+            if self._stopped():
+                self._clear_guide()
+                return RunResult("stopped", "Stopped by user.", step, self.backend.dry_run)
             self._last_snapshot = snapshot
             self._last_scene = scene
             self._remember_target(snapshot)
@@ -516,7 +524,17 @@ class AgentLoop:
         return dispatch_tool(self.backend, name, args, extra=extra)
 
     def _observe_pair(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
-        """UIA dump overlapped with FastVLM /scene. Scene is ready before PLAN."""
+        """UIA dump overlapped with FastVLM /scene. Scene is ready before PLAN.
+
+        If the scene thread is still empty after ``scene_timeout``, fail-open to
+        UIA-only. Do not start a second /scene — the sidecar serializes generate
+        behind one lock, so a retry would hang until the first (still running)
+        inference finishes. STOP skips a new infer and abandons the join wait.
+        """
+        from desk_pilot.vision.scene import empty_scene
+
+        want_scene = self._scene_enabled() and not self._stopped()
+        self._log("observe", "capturing scene…" if want_scene else "listing UI…")
         box: list[int] | None = None
         try:
             box = self.backend.focused_window_rect()
@@ -528,33 +546,55 @@ class AgentLoop:
             holder["scene"] = self._infer_scene(snapshot=None, box=box)
 
         worker: threading.Thread | None = None
-        if self._scene_enabled() and box:
+        wait = max(0.05, float(self.scene_timeout))
+        if want_scene and box:
             worker = threading.Thread(target=run_scene, name="fastvlm-scene", daemon=True)
             worker.start()
         snapshot = self.backend.list_ui()
         if worker is not None:
-            worker.join(timeout=45)
+            self._join_scene_worker(worker, wait)
             scene = holder.get("scene")
             if scene is None:
-                scene = self._infer_scene(snapshot=snapshot, box=None)
-        elif self._scene_enabled():
+                window = self._snapshot_window_name(snapshot)
+                if self._stopped():
+                    self._log("observe", "scene skipped (stop); continuing with UIA")
+                    scene = empty_scene(window=window, note="scene skipped (stop); continuing with UIA")
+                else:
+                    self._log("observe", f"FastVLM last-resort skip after {wait:g}s; continuing with UIA (no second /scene)")
+                    scene = empty_scene(window=window, note="scene timed out; continuing with UIA")
+        elif want_scene and not self._stopped():
             scene = self._infer_scene(snapshot=snapshot, box=None)
         else:
             scene = None
         if isinstance(snapshot, dict) and isinstance(scene, dict) and not scene.get("window"):
-            window = snapshot.get("window") if isinstance(snapshot.get("window"), dict) else {}
-            title = str((window or {}).get("name") or "")
+            title = self._snapshot_window_name(snapshot)
             if title:
                 scene = dict(scene)
                 scene["window"] = title
         return snapshot, scene if isinstance(scene, dict) else None
+
+    def _join_scene_worker(self, worker: threading.Thread, wait: float) -> None:
+        deadline = time.monotonic() + wait
+        while worker.is_alive():
+            if self._stopped():
+                return
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            worker.join(timeout=min(0.2, remaining))
+
+    def _snapshot_window_name(self, snapshot: dict[str, Any] | None) -> str:
+        window = snapshot.get("window") if isinstance(snapshot, dict) else None
+        if not isinstance(window, dict):
+            return ""
+        return str(window.get("name") or "")
 
     def _scene_enabled(self) -> bool:
         return self.scene_client is not None
 
     def _infer_scene(self, *, snapshot: dict[str, Any] | None, box: list[int] | None) -> dict[str, Any] | None:
         client = self.scene_client
-        if client is None:
+        if client is None or self._stopped():
             return None
         from desk_pilot.vision.capture import capture_content_screenshot
         from desk_pilot.vision.scene import empty_scene
@@ -567,7 +607,12 @@ class AgentLoop:
             self._log("observe", f"scene capture skipped: {note}")
             return empty_scene(window=window, region=region, note=note)
         try:
-            return client.infer_scene(path=str(captured.get("path") or ""), window=window, region=region)
+            return client.infer_scene(
+                path=str(captured.get("path") or ""),
+                window=window,
+                region=region,
+                timeout=self.scene_timeout,
+            )
         except Exception as exc:  # noqa: BLE001
             self._log("error", f"FastVLM scene failed: {exc}")
             return empty_scene(window=window, region=region, note=f"scene failed: {exc}")

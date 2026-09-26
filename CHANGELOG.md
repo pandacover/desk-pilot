@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.7
+
+- **FastVLM `/scene` latency**: CPU generate was using a 1024² crop and `max_new_tokens=512` (Apple's own snippet uses 128). That decode is what hung live Windows for minutes after Vision ready. Sidecar now downscales to **512px on CPU / 768px on CUDA**, greedy decode, **192 new tokens**, and **stops when the JSON object is complete**. Decode only the new tokens (not the prompt example JSON). Optional CUDA 8-bit via `DESK_PILOT_FASTVLM_8BIT=1` if bitsandbytes imports. Expected: CUDA ~1–3s/scene after warmup; CPU ~5–15s after warmup (first call slower). Sidecar logs `/scene start` and `/scene end elapsed_ms=…` to `fastvlm-sidecar.log`.
+- **`/health` progress**: `status` is `loading|ready|busy|error` with `phase` `loading_weights|inferring`. The chip shows **Vision inferring…** during generate instead of a silent hang. Run stays enabled while busy (model is already loaded).
+- **Agent deadlock**: `_observe_pair` must not start a second `/scene` after join timeout (that stacked behind `_infer_lock`). Fail-open to UIA is a **last resort** after the tuned timeout, logged as `FastVLM last-resort skip`.
+- **STOP unsticks `_running`**: observe honors `stop_event`; if the worker is still alive ~2.5s after STOP, the UI abandons the stuck step so Run works again.
+
+## 0.2.6
+
 ## 0.2.6
 
 - **FastVLM `timm`**: `apple/FastVLM-0.5B` remote code imports `timm` for the vision tower. Live Windows load failed with `ImportError: This modeling file requires ... timm`. `requirements-vision.txt` now includes `timm`, plus `einops` and `sentencepiece` (the other easy-to-miss extras from Apple's FastVLM pyproject). Reinstall vision deps, then restart Desk Pilot.

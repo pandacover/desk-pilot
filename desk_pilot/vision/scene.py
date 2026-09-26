@@ -17,9 +17,40 @@ SCENE_PROMPT = (
     '{"id":"img_0","label":"...","role":"button|link|image|input|text|icon|other",'
     '"box":[left,top,right,bottom],"click":[cx,cy]}],"note":"optional short"}'
     " The crop's top-left is screen (region.x, region.y); size is region.w x region.h. "
-    "box and click MUST be absolute screen pixels. Cap 20 salient elements "
+    "box and click MUST be absolute screen pixels. Cap 12 salient elements "
     "(buttons, links, images, inputs, icons, result tiles). Skip tiny chrome noise."
 )
+
+
+def json_object_complete(text: str) -> bool:
+    """True when ``text`` contains a balanced JSON object (string-aware)."""
+    start = (text or "").find("{")
+    if start < 0:
+        return False
+    depth = 0
+    in_str = False
+    escape = False
+    for ch in text[start:]:
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return True
+            if depth < 0:
+                return False
+    return False
 
 
 def compact_scene(scene: dict[str, Any] | None) -> str:

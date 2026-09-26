@@ -23,9 +23,9 @@ pip install -r requirements-vision.txt   # FastVLM sidecar (PyTorch, transformer
 python -m desk_pilot
 ```
 
-The first FastVLM start downloads **apple/FastVLM-0.5B** from Hugging Face (~1GB) into the Hugging Face cache. Load happens in the sidecar process after the Desk Pilot window appears — the UI is not blocked. CPU is OK (first load is slow); CUDA is used when available.
+The first FastVLM start downloads **apple/FastVLM-0.5B** from Hugging Face (~1GB) into the Hugging Face cache. Load happens in the sidecar process after the Desk Pilot window appears — the UI is not blocked. **CUDA** is used when available (~1–3s per `/scene` after warmup). **CPU is supported** (~5–15s per `/scene` after warmup at 512px / 192 tokens; first generate is slower). The chip shows **Vision inferring…** while `/scene` runs. Sidecar timings go to `fastvlm-sidecar.log` in the Desk Pilot cache directory.
 
-To skip vision: Settings **FastVLM scene observe** off, or `DESK_PILOT_FASTVLM=0`. Observe then uses UIA only. `python -m desk_pilot.vision.sidecar --stub` serves empty scenes without weights.
+FastVLM is the default observe path. Settings **FastVLM scene observe** off (or `DESK_PILOT_FASTVLM=0`) is UIA-only for debugging, not the recommended setup. `python -m desk_pilot.vision.sidecar --stub` serves empty scenes without weights.
 
 Or: `python run.py`
 
@@ -80,7 +80,7 @@ python -m desk_pilot --cli --no-fastvlm --goal "Open Notepad and type hello"
 observe (UIA tree + FastVLM scene JSON) → plan (OpenRouter tools, no image) → act → observe → repeat
 ```
 
-After each ACT settles, Desk Pilot captures a compressed crop of the focused window/content region and POSTs it to the local FastVLM sidecar (`POST /scene`) **in parallel** with `list_ui`, so the scene is ready before PLAN. The planner sees `scene:` compact JSON (cap ~20 elements, screen coords) — not a screenshot.
+After each ACT settles, Desk Pilot captures a compressed crop of the focused window/content region (max edge 768, 512 on CPU) and POSTs it to the local FastVLM sidecar (`POST /scene`) **in parallel** with `list_ui`. Generate is greedy, capped at 192 new tokens, and stops when the scene JSON object is complete. The planner sees `scene:` compact JSON (cap ~12–20 elements, screen coords) — not a screenshot. If `/scene` still has not returned after ~40s, that step fail-opens to UIA-only as a last resort (it does **not** start a second infer).
 
 Tools the model can call:
 
@@ -108,6 +108,17 @@ Typical “open Notepad” path: if Notepad is already in `top_windows`, `focus_
 Typical “find brawlhalla.exe” path: `find_files` with `name=brawlhalla.exe` → `done` with the full paths. Not Win+S, not Edge, not Explorer search.
 
 The loop **already executes every tool call in one model turn**, in order, then re-reads the UI once (and refreshes the FastVLM scene). Normal goals should still emit one action. Canvas mode (below) may emit a short sequence of `drag`s in that same turn.
+
+## Pull latest (0.2.7)
+
+Makes **FastVLM `/scene` usable on CPU** (and faster on CUDA). Live 0.2.6 hung for minutes on the first generate because decode used 512 new tokens at 1024². Now: 512px CPU / 768px CUDA, greedy, 192 tokens, stop at complete JSON. Chip shows **Vision inferring…**. Sidecar log lines `elapsed_ms`. The agent no longer deadlocks by retrying `/scene` behind the sidecar lock; fail-open is last resort only. STOP still unlocks Run if a call is mid-flight.
+
+```powershell
+git pull
+python -m desk_pilot
+```
+
+Expect `capturing scene…` then `scene: N elements` (or a last-resort UIA skip, not a silent hang). `fastvlm-sidecar.log` should show `/scene end elapsed_ms=…`.
 
 ## Pull latest (0.2.6)
 
@@ -280,7 +291,7 @@ COM STA on the agent worker thread (`CoInitialize` / empty `list_ui`) and `launc
 
 - Will **not** start a run without an API key.
 - Confirmation dialog before live control (can be turned off in Settings).
-- Oversized red **STOP** button; Esc requests stop after the current tool/LLM call.
+- Oversized red **STOP** button; Esc requests stop. If a `/scene` call is mid-flight, Run unlocks after a few seconds even if the worker is still blocked.
 - Stays inside the stated goal; the system prompt tells the model not to enter passwords or pay for things unless you asked.
 
 ## Tests
