@@ -159,5 +159,45 @@ class ConfigFastvlmTests(unittest.TestCase):
                 os.environ["DESK_PILOT_FASTVLM"] = old
 
 
+class HealthErrorChipTests(unittest.TestCase):
+    def test_timm_importerror_is_short(self) -> None:
+        from desk_pilot.vision import missing_package_name, short_health_error
+
+        live = (
+            "ImportError: This modeling file requires the timm library but it was not found "
+            "in your environment. You can install it with pip: `pip install timm`. "
+            "Please note that you may need to restart your runtime after installation."
+        )
+        self.assertEqual(missing_package_name(live), "timm")
+        self.assertEqual(short_health_error(live), "missing timm")
+
+    def test_status_label_shows_missing_package(self) -> None:
+        from desk_pilot.vision.manager import SidecarManager
+
+        manager = SidecarManager(enabled=True, stub=True)
+        manager._last_health = {
+            "status": "error",
+            "error": (
+                "FastVLM load failed: ImportError: This modeling file requires the timm "
+                "library but it was not found in your environment. Run `pip install timm`"
+            ),
+        }
+        self.assertEqual(manager.status_label(), "Vision: missing timm")
+
+    def test_short_health_error_passthrough(self) -> None:
+        from desk_pilot.vision import short_health_error
+
+        self.assertEqual(short_health_error("missing timm"), "missing timm")
+        self.assertEqual(short_health_error("sidecar unreachable"), "sidecar unreachable")
+
+    def test_requirements_vision_lists_timm(self) -> None:
+        text = Path(__file__).resolve().parents[1].joinpath("requirements-vision.txt").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("timm", text)
+        self.assertIn("einops", text)
+        self.assertIn("sentencepiece", text)
+
+
 if __name__ == "__main__":
     unittest.main()

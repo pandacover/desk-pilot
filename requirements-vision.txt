@@ -5,6 +5,12 @@
 #   pip install -r requirements-vision.txt
 #   python -m desk_pilot.vision.sidecar          # GET /health, POST /scene on 127.0.0.1:8765
 #   python -m desk_pilot.vision.sidecar --stub   # empty scenes, no weights (dry-run / CI)
+#
+# apple/FastVLM-0.5B remote code imports timm (vision tower). einops + sentencepiece
+# are the other easy-to-miss LLaVA/Qwen2 extras from Apple's FastVLM pyproject.
 torch>=2.2
 transformers>=4.46.0
 accelerate>=0.34.0
+timm>=1.0.15
+einops>=0.6.1
+sentencepiece>=0.1.99

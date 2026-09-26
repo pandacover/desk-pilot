@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.6
+
+- **FastVLM `timm`**: `apple/FastVLM-0.5B` remote code imports `timm` for the vision tower. Live Windows load failed with `ImportError: This modeling file requires ... timm`. `requirements-vision.txt` now includes `timm`, plus `einops` and `sentencepiece` (the other easy-to-miss extras from Apple's FastVLM pyproject). Reinstall vision deps, then restart Desk Pilot.
+- **Clearer vision error chip**: if `/health` reports a missing package, the status shows `Vision: missing timm` instead of a generic **Vision error**.
+
 ## 0.2.5
 
 - **FastVLM scene observe**: after each ACT, capture a compressed crop of the focused window/content region and POST it to a local FastVLM sidecar (`apple/FastVLM-0.5B`). OBSERVE includes UIA plus compact `scene:` JSON (element boxes, labels, click centers; cap 20). The OpenRouter planner does **not** receive raw screenshots by default. Scene inference overlaps `list_ui` so it is ready before PLAN.
